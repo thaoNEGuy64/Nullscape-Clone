@@ -1,0 +1,746 @@
+-- LevelController.server.lua
+-- ServerScriptService
+-- Main game orchestrator - voting system + player management + level flow
+-- Stripped: No FirstBlock, Elevator, LobbySpawn, pedestal fling
+-- Stubs: Cinematics, Extraction, Collapse, Enemies
+
+local Players             = game:GetService("Players")
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
+local Workspace           = game:GetService("Workspace")
+local ServerScriptService = game:GetService("ServerScriptService")
+local TweenService        = game:GetService("TweenService")
+local RunService          = game:GetService("RunService")
+
+-- ========================================
+-- UTILITIES
+-- ========================================
+local function getOrCreate(className, name, parent)
+	parent = parent or ReplicatedStorage
+	local existing = parent:FindFirstChild(name)
+	if existing then return existing end
+	local obj = Instance.new(className)
+	obj.Name   = name
+	obj.Parent = parent
+	return obj
+end
+
+local function ensureBindable(name)
+	return getOrCreate("BindableEvent", name)
+end
+
+-- ========================================
+-- REMOTES / BINDABLES
+-- ========================================
+local UpdateGameStateEvent   = getOrCreate("RemoteEvent",  "UpdateGameState")
+local FreezePlayerEvent      = getOrCreate("RemoteEvent",  "FreezePlayer")
+local NotifyGenCompleteEvent = getOrCreate("RemoteEvent",  "NotifyGenComplete")
+local StartLevelEvent        = getOrCreate("RemoteEvent",  "StartLevelEvent")
+local RoundCinematicEvent    = getOrCreate("RemoteEvent",  "RoundCinematicEvent")
+local StateChangedEvent      = getOrCreate("RemoteEvent",  "StateChanged")
+local SubstateChangedEvent   = getOrCreate("RemoteEvent",  "SubstateChanged")
+
+local QuotaMetEventObj = ReplicatedStorage:FindFirstChild("QuotaMetEvent")
+if not QuotaMetEventObj then
+	QuotaMetEventObj        = Instance.new("BindableEvent")
+	QuotaMetEventObj.Name   = "QuotaMetEvent"
+	QuotaMetEventObj.Parent = ReplicatedStorage
+end
+
+local PlayerEscapedEventObj = ReplicatedStorage:FindFirstChild("PlayerEscaped")
+if not PlayerEscapedEventObj then
+	PlayerEscapedEventObj        = Instance.new("RemoteEvent")
+	PlayerEscapedEventObj.Name   = "PlayerEscaped"
+	PlayerEscapedEventObj.Parent = ReplicatedStorage
+end
+
+-- ========================================
+-- MODULES
+-- ========================================
+local ModulesFolder = ServerScriptService:FindFirstChild("GameModules")
+if not ModulesFolder then
+	ModulesFolder        = Instance.new("Folder")
+	ModulesFolder.Name   = "GameModules"
+	ModulesFolder.Parent = ServerScriptService
+end
+
+local VotingManager, MoneyManager, ActiveEffectsManager
+local EnemyRegistry, CurseManager, UpgradeManager
+
+task.spawn(function()
+	local waited = 0
+	while waited < 10 do
+		VotingManager        = ModulesFolder:FindFirstChild("VotingManager")
+		MoneyManager         = ModulesFolder:FindFirstChild("MoneyManager")
+		ActiveEffectsManager = ModulesFolder:FindFirstChild("ActiveEffectsManager")
+		EnemyRegistry        = ModulesFolder:FindFirstChild("EnemyRegistry")
+		CurseManager         = ModulesFolder:FindFirstChild("CurseManager")
+		UpgradeManager       = ModulesFolder:FindFirstChild("UpgradeManager")
+		if VotingManager and EnemyRegistry and CurseManager and UpgradeManager then break end
+		task.wait(0.5); waited += 0.5
+	end
+
+	if VotingManager        then VotingManager        = require(VotingManager)        end
+	if MoneyManager         then MoneyManager         = require(MoneyManager)         end
+	if ActiveEffectsManager then ActiveEffectsManager = require(ActiveEffectsManager) end
+	if EnemyRegistry        then EnemyRegistry        = require(EnemyRegistry)        end
+	if CurseManager         then CurseManager         = require(CurseManager)         end
+	if UpgradeManager       then UpgradeManager       = require(UpgradeManager)       end
+
+	print("[LEVEL CONTROLLER] Modules loaded.")
+end)
+
+-- ========================================
+-- STUB FLAGS
+-- Flip to true as you add each real system
+-- ========================================
+local HAS_CINEMATICS = false
+local HAS_EXTRACTION = false
+local HAS_ENEMIES    = false
+local HAS_COLLAPSE   = false
+
+-- ========================================
+-- GAME STATE
+-- ========================================
+local GameState = {
+	currentLevel     = 0,
+	state            = "Waiting",
+	quota            = 1,
+	deposited        = 0,
+	escapedPlayers   = {},
+	deadPlayers      = {},
+
+	MAIN_STATE       = "Start",
+	SUBSTATE         = "WaitingForStart",
+
+	selectedEnemy    = nil,
+	permanentEnemies = {},
+	selectedCurses   = {},
+	selectedUpgrades = {},
+	levelStartTime   = 0,
+}
+
+local generationAckByUserId     = {}
+local generationSyncToken       = 0
+local generationFinalizeStarted = false
+local generationSyncDeadline    = 0
+local generationSyncLevel       = 0
+local generationSyncQuota       = 1
+local roundTransitionInProgress = false
+
+-- ========================================
+-- STUBS
+-- ========================================
+local function fireCinematic(action, payload)
+	if not HAS_CINEMATICS then return end
+	payload = payload or {}; payload.action = action
+	pcall(function() RoundCinematicEvent:FireAllClients(payload) end)
+end
+
+local function startMapBreakdown()
+	if not HAS_COLLAPSE then
+		print("[LEVEL CONTROLLER] (stub) Collapse skipped — no collapse system yet")
+		return
+	end
+	if type(_G.StartMapBreakdown) == "function" then pcall(_G.StartMapBreakdown); return end
+	local be = ReplicatedStorage:FindFirstChild("StartMapBreakdown")
+	if be and be:IsA("BindableEvent") then pcall(function() be:Fire() end) end
+end
+
+local function spawnEnemies()
+	if not HAS_ENEMIES then
+		print("[LEVEL CONTROLLER] (stub) Enemy spawn skipped — no enemies yet")
+		return
+	end
+	local SpawnEnemy = ensureBindable("SpawnEnemy")
+	for enemyName, enemyCount in pairs(GameState.permanentEnemies) do
+		if enemyCount and enemyCount > 0 then
+			pcall(function() SpawnEnemy:Fire(enemyName, enemyCount) end)
+		end
+	end
+end
+
+-- ========================================
+-- PLAYER HELPERS
+-- ========================================
+local function freezeAllPlayers(freeze)
+	for _, player in ipairs(Players:GetPlayers()) do
+		local char = player.Character
+		if char then
+			local hum = char:FindFirstChild("Humanoid")
+			local hrp = char:FindFirstChild("HumanoidRootPart")
+			if hum and hrp then
+				if freeze then
+					hum.WalkSpeed = 0; hum.JumpPower = 0; hum.JumpHeight = 0; hrp.Anchored = true
+				else
+					hum.WalkSpeed = 16; hum.JumpPower = 50; hum.JumpHeight = 7.2; hrp.Anchored = false
+				end
+			end
+		end
+		pcall(function() FreezePlayerEvent:FireClient(player, freeze) end)
+	end
+	print("[LEVEL CONTROLLER]", freeze and "Frozen" or "Unfrozen", "all players")
+end
+
+-- Teleport everyone to the generated map's Spawn room.
+-- Falls back to 0,100,0 if the room isn't found yet.
+-- ── Door transition remote ────────────────────────────────────
+-- Tells a specific client to flash white (entering the door)
+local DoorFlashEvent        = getOrCreate("RemoteEvent", "DoorFlash")
+local EnterSpectatorEvent   = getOrCreate("RemoteEvent", "EnterSpectator")   -- others still alive
+local ReturnToVoteEvent     = getOrCreate("RemoteEvent", "ReturnToVote")      -- everyone done
+
+-- ── Door helpers ──────────────────────────────────────────────
+local DOOR_OPEN_ANGLE    = math.rad(90)   -- real doors open ~90 degrees
+local DOOR_OPEN_TIME     = 1.2
+local DOOR_ENTRY_TIMEOUT = 20
+
+local function getLevelDoor()
+	return Workspace:FindFirstChild("LevelDoor")
+end
+
+local function getMapSpawnCFrame()
+	local genFolder  = Workspace:FindFirstChild("GeneratedRooms")
+	local spawnModel = genFolder and genFolder:FindFirstChild("Spawn")
+	if spawnModel then
+		return CFrame.new(spawnModel:GetPivot().Position + Vector3.new(0, 5, 0))
+	end
+	return CFrame.new(0, 100, 0)
+end
+
+local function teleportPlayerIntoMap(player)
+	local char = player.Character
+	if not char then return end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+	-- Flash white on client then teleport
+	pcall(function() DoorFlashEvent:FireClient(player) end)
+	task.wait(0.15)  -- let flash start before the position snaps
+	hrp.CFrame = getMapSpawnCFrame()
+	player:SetAttribute("EnteredLevel", true)
+end
+
+-- Swing the door open, connect DoorTrigger as walk-through detector,
+-- then after DOOR_ENTRY_TIMEOUT force everyone remaining through.
+local doorConnection = nil
+local doorClosedCF   = nil  -- saved so close() returns to exact original CFrame
+
+local function getDoorOpenCF(panel)
+	-- Rotate around the pivot's local UP axis (hinge).
+	-- CFrame.Angles rotates in local space of the pivot so the door
+	-- swings correctly regardless of how the model is oriented in the world.
+	local pivotCF     = panel:GetPivot()
+	local localOffset = pivotCF:Inverse() * panel.CFrame
+	-- Negative angle so it swings open away from the frame (outward)
+	-- Flip sign here if it opens the wrong way in your scene
+	return (pivotCF * CFrame.Angles(0, -DOOR_OPEN_ANGLE, 0)) * localOffset
+end
+
+local function openDoorAndSendPlayers(level, quota)
+	local door = getLevelDoor()
+	if not door then
+		warn("[LEVEL CONTROLLER] LevelDoor not found — teleporting directly")
+		for _, p in ipairs(Players:GetPlayers()) do teleportPlayerIntoMap(p) end
+		return
+	end
+
+	local panel   = door:FindFirstChild("DoorPanel")
+	local trigger = door:FindFirstChild("DoorTrigger")
+
+	for _, p in ipairs(Players:GetPlayers()) do
+		p:SetAttribute("EnteredLevel", false)
+	end
+
+	-- Swing door open around its hinge pivot
+	if panel then
+		doorClosedCF = panel.CFrame
+		TweenService:Create(panel,
+			TweenInfo.new(DOOR_OPEN_TIME, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ CFrame = getDoorOpenCF(panel) }
+		):Play()
+	end
+
+	task.wait(DOOR_OPEN_TIME)
+
+	-- Proximity check on DoorTrigger every 0.1s — reliable on any part shape
+	if trigger then
+		trigger.CanCollide = false
+		if doorConnection then doorConnection:Disconnect() end
+		local lastCheck = 0
+		doorConnection = RunService.Heartbeat:Connect(function()
+			local now = tick()
+			if now - lastCheck < 0.1 then return end
+			lastCheck = now
+			if not trigger or not trigger.Parent then
+				doorConnection:Disconnect(); return
+			end
+			for _, p in ipairs(Players:GetPlayers()) do
+				if p:GetAttribute("EnteredLevel") then continue end
+				local char = p.Character
+				local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+				if hrp and (hrp.Position - trigger.Position).Magnitude <= 5 then
+					teleportPlayerIntoMap(p)
+				end
+			end
+		end)
+	end
+
+	-- After timeout force remaining players through
+	task.delay(DOOR_ENTRY_TIMEOUT, function()
+		if GameState.state ~= "Playing" then return end
+		local forcedCount = 0
+		for _, p in ipairs(Players:GetPlayers()) do
+			if not p:GetAttribute("EnteredLevel") then
+				teleportPlayerIntoMap(p)
+				forcedCount += 1
+			end
+		end
+		if forcedCount > 0 then
+			print(string.format("[LEVEL CONTROLLER] Force-teleported %d straggler(s)", forcedCount))
+		end
+		if doorConnection then doorConnection:Disconnect(); doorConnection = nil end
+	end)
+end
+
+local function closeDoor()
+	local door = getLevelDoor()
+	if not door then return end
+	local panel = door:FindFirstChild("DoorPanel")
+	if panel and doorClosedCF then
+		TweenService:Create(panel,
+			TweenInfo.new(DOOR_OPEN_TIME, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+			{ CFrame = doorClosedCF }
+		):Play()
+	end
+	if doorConnection then doorConnection:Disconnect(); doorConnection = nil end
+end
+
+-- Get the CFrame of the Vote part in Workspace
+local function getVoteCFrame()
+	local votePart = Workspace:FindFirstChild("Vote")
+	if votePart and votePart:IsA("BasePart") then
+		return votePart.CFrame + Vector3.new(0, 5, 0)
+	end
+	-- Fallback if Vote part missing
+	warn("[LEVEL CONTROLLER] 'Vote' part not found in Workspace!")
+	return CFrame.new(0, 50, 0)
+end
+
+local function teleportPlayerToVote(player)
+	local char = player.Character
+	if not char then return end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+	hrp.CFrame = getVoteCFrame()
+end
+
+local function teleportToVote()
+	local cf = getVoteCFrame()
+	for _, player in ipairs(Players:GetPlayers()) do
+		local char = player.Character
+		if char then
+			local hrp = char:FindFirstChild("HumanoidRootPart")
+			if hrp then hrp.CFrame = cf end
+		end
+	end
+	print("[LEVEL CONTROLLER] Teleported all players to Vote")
+end
+
+-- ========================================
+-- STATE BROADCAST
+-- ========================================
+local function broadcastState()
+	pcall(function() StateChangedEvent:FireAllClients(GameState.MAIN_STATE) end)
+	pcall(function() SubstateChangedEvent:FireAllClients(GameState.SUBSTATE) end)
+	print("[LEVEL CONTROLLER] State:", GameState.MAIN_STATE, "| Substate:", GameState.SUBSTATE)
+end
+
+local function changeMainState(s)  GameState.MAIN_STATE = s; broadcastState() end
+local function changeSubstate(s)   GameState.SUBSTATE   = s; broadcastState() end
+
+-- ========================================
+-- VOTING FLOW
+-- ========================================
+local function isEvenLevel() return GameState.currentLevel % 2 == 0 end
+
+local startEnemyVoting, startCurseVoting, startUpgradeVoting, startLevelGeneration
+local beginGenerationSync
+
+local function getOptionTier(voteType, optionName)
+	if voteType == "Upgrade" and UpgradeManager and type(UpgradeManager.GetUpgradeData) == "function" then
+		local d = UpgradeManager:GetUpgradeData(optionName); return d and tonumber(d.Tier)
+	elseif voteType == "Curse" and CurseManager and type(CurseManager.GetCurseData) == "function" then
+		local d = CurseManager:GetCurseData(optionName); return d and tonumber(d.Tier)
+	elseif voteType == "Enemy" and EnemyRegistry then
+		if type(EnemyRegistry.GetEnemyData) == "function" then
+			local d = EnemyRegistry:GetEnemyData(optionName); return d and tonumber(d.Tier)
+		end
+		if type(EnemyRegistry.Enemies) == "table" and type(EnemyRegistry.Enemies[optionName]) == "table" then
+			return tonumber(EnemyRegistry.Enemies[optionName].Tier)
+		end
+	end
+	return nil
+end
+
+local function filterOptionsByTier(voteType, level, options)
+	local filtered = {}
+	for _, opt in ipairs(options or {}) do
+		local tier = getOptionTier(voteType, opt)
+		if not tier or tier <= level then table.insert(filtered, opt) end
+	end
+	return #filtered == 0 and options or filtered
+end
+
+startEnemyVoting = function()
+	if not VotingManager then warn("[LEVEL CONTROLLER] VotingManager not loaded"); return end
+	changeSubstate("EnemyVoting")
+	local opts = filterOptionsByTier("Enemy", GameState.currentLevel,
+		VotingManager:GetEnemyOptions(GameState.currentLevel, 3))
+	VotingManager:StartVote("Enemy", opts, function(winner)
+		GameState.selectedEnemy = winner
+		GameState.permanentEnemies[winner] = (GameState.permanentEnemies[winner] or 0) + 1
+		print("[LEVEL CONTROLLER] Enemy selected:", winner)
+		task.wait(1); startCurseVoting()
+	end)
+end
+
+startCurseVoting = function()
+	if not VotingManager then return end
+	changeSubstate("CurseVoting")
+	local opts = filterOptionsByTier("Curse", GameState.currentLevel,
+		VotingManager:GetCurseOptions(GameState.currentLevel, 3))
+	VotingManager:StartVote("Curse", opts, function(winner)
+		table.insert(GameState.selectedCurses, winner)
+		print("[LEVEL CONTROLLER] Curse selected:", winner)
+		task.wait(1); startUpgradeVoting()
+	end)
+end
+
+startUpgradeVoting = function()
+	if not VotingManager then return end
+	changeSubstate("UpgradeVoting")
+	local opts = filterOptionsByTier("Upgrade", GameState.currentLevel,
+		VotingManager:GetUpgradeOptions(GameState.currentLevel, 3))
+
+	if _G.UpdateLeftPedestal then _G.UpdateLeftPedestal("SkipUpgrade", true) end
+
+	VotingManager:StartVote("Upgrade", opts, function(winner)
+		if winner == "SKIPPED" then
+			print("[LEVEL CONTROLLER] Upgrade skipped")
+			task.wait(1); startLevelGeneration(); return
+		end
+		table.insert(GameState.selectedUpgrades, winner)
+		print("[LEVEL CONTROLLER] Upgrade selected:", winner)
+		task.wait(0.35); startUpgradeVoting()
+	end)
+end
+
+local function startVotingPhase()
+	local clearEv = ReplicatedStorage:FindFirstChild("ClearEnemies")
+	if not clearEv then clearEv = ensureBindable("ClearEnemies") end
+	pcall(function() clearEv:Fire() end)
+
+	changeMainState("Voting")
+	GameState.selectedEnemy    = nil
+	GameState.selectedCurses   = {}
+	GameState.selectedUpgrades = {}
+
+	-- Move players to safe spot while voting happens
+	teleportToVote()
+	freezeAllPlayers(false)
+
+	-- Reset pedestal to voting-ready state
+	if _G.UpdateLeftPedestal then _G.UpdateLeftPedestal("WaitingForStart", false) end
+
+	if isEvenLevel() then
+		print("[LEVEL CONTROLLER] Even level — skipping enemy vote")
+		startCurseVoting()
+	else
+		print("[LEVEL CONTROLLER] Odd level — starting enemy vote")
+		startEnemyVoting()
+	end
+end
+
+-- ========================================
+-- GENERATION & GAMEPLAY
+-- ========================================
+startLevelGeneration = function()
+	changeMainState("InGame")
+	changeSubstate("Generating")
+	GameState.state          = "Generating"
+	GameState.deposited      = 0
+	GameState.escapedPlayers = {}
+	GameState.deadPlayers    = {}
+
+	print(string.format("[LEVEL CONTROLLER] Starting Level %d generation", GameState.currentLevel))
+
+	if ActiveEffectsManager then
+		for _, c in ipairs(GameState.selectedCurses)   do ActiveEffectsManager:ApplyCurse(c)   end
+		for _, u in ipairs(GameState.selectedUpgrades) do ActiveEffectsManager:ApplyUpgrade(u) end
+	end
+
+	freezeAllPlayers(true)
+
+	pcall(function() UpdateGameStateEvent:FireAllClients({
+		state = "Generating", level = GameState.currentLevel
+		}) end)
+
+	task.wait(0.1)
+
+	-- Fire TriggerGeneration — Generator.server.lua handles this
+	local trigEv = ReplicatedStorage:FindFirstChild("TriggerGeneration") or ensureBindable("TriggerGeneration")
+	pcall(function() trigEv:Fire(GameState.currentLevel) end)
+
+	beginGenerationSync(GameState.currentLevel, GameState.quota)
+end
+
+local function countGenerationReadyPlayers()
+	local total, ready = 0, 0
+	for _, pl in ipairs(Players:GetPlayers()) do
+		total += 1
+		if generationAckByUserId[pl.UserId] then ready += 1 end
+	end
+	return ready, total
+end
+
+local function finalizeGenerationIfNeeded(level, quota, reason)
+	if generationFinalizeStarted or GameState.state ~= "Generating" then return end
+	generationFinalizeStarted = true
+
+	GameState.quota = quota or generationSyncQuota or 1
+	GameState.state = "Playing"
+	changeSubstate("Collecting")
+
+	print(string.format("[LEVEL CONTROLLER] Finalize (%s) Level:%d Quota:%d", reason, level or 0, GameState.quota))
+
+	task.wait(2)
+
+	-- Open the door — players walk through voluntarily or get force-pushed after 20s
+	openDoorAndSendPlayers(level, GameState.quota)
+
+	-- Unfreeze so players can walk to the door
+	freezeAllPlayers(false)
+
+	pcall(function() UpdateGameStateEvent:FireAllClients({
+		state     = "Playing",
+		level     = level,
+		quota     = GameState.quota,
+		deposited = 0,
+		}) end)
+
+	local resetQuota = ReplicatedStorage:FindFirstChild("ResetQuota") or ensureBindable("ResetQuota")
+	pcall(function() resetQuota:Fire(level, GameState.quota) end)
+
+	task.wait(0.35)
+	spawnEnemies()
+
+	GameState.levelStartTime = tick()
+	print("[LEVEL CONTROLLER] Game started! Level:", level)
+end
+
+beginGenerationSync = function(level, quota)
+	generationSyncToken        += 1
+	local myToken               = generationSyncToken
+	generationFinalizeStarted   = false
+	generationAckByUserId       = {}
+	generationSyncLevel         = level or GameState.currentLevel
+	generationSyncQuota         = quota or 1
+	generationSyncDeadline      = tick() + 15
+
+	task.spawn(function()
+		while GameState.state == "Generating" and not generationFinalizeStarted and myToken == generationSyncToken do
+			local ready, total = countGenerationReadyPlayers()
+			if total > 0 and ready >= total then
+				finalizeGenerationIfNeeded(generationSyncLevel, generationSyncQuota, "all_ready"); return
+			end
+			if tick() >= generationSyncDeadline then
+				finalizeGenerationIfNeeded(generationSyncLevel, generationSyncQuota,
+					string.format("timeout_%d_of_%d", ready, total)); return
+			end
+			task.wait(0.25)
+		end
+	end)
+end
+
+NotifyGenCompleteEvent.OnServerEvent:Connect(function(player, level, quota)
+	if GameState.state ~= "Generating" or not player then return end
+	if level then generationSyncLevel = level end
+	if quota  then generationSyncQuota = quota  end
+	generationAckByUserId[player.UserId] = true
+	local ready, total = countGenerationReadyPlayers()
+	print(string.format("[LEVEL CONTROLLER] GenComplete from %s (%d/%d)", player.Name, ready, total))
+	if total > 0 and ready >= total then
+		finalizeGenerationIfNeeded(generationSyncLevel, generationSyncQuota, "all_ready")
+	end
+end)
+
+-- ========================================
+-- QUOTA MET
+-- ========================================
+local function startCollapsePhase()
+	changeSubstate("Collapse")
+	GameState.state = "QuotaMet"
+	print(string.format("[LEVEL CONTROLLER] Quota met! Level %d", GameState.currentLevel))
+
+	if MoneyManager and type(MoneyManager.AddCoins) == "function" then
+		MoneyManager:AddCoins(100 * GameState.currentLevel)
+	end
+
+	pcall(function() UpdateGameStateEvent:FireAllClients({
+		state = "QuotaMet", level = GameState.currentLevel
+		}) end)
+
+	startMapBreakdown()
+end
+
+if QuotaMetEventObj:IsA("BindableEvent") then
+	QuotaMetEventObj.Event:Connect(function()
+		if GameState.state == "Playing" then startCollapsePhase() end
+	end)
+elseif QuotaMetEventObj:IsA("RemoteEvent") then
+	QuotaMetEventObj.OnServerEvent:Connect(function()
+		if GameState.state == "Playing" then startCollapsePhase() end
+	end)
+end
+
+-- ========================================
+-- ESCAPE & DEATH
+-- ========================================
+local function advanceRound()
+	if roundTransitionInProgress then return end
+	roundTransitionInProgress = true
+
+	GameState.state = "Transitioning"
+	pcall(function() UpdateGameStateEvent:FireAllClients({state = "Transitioning"}) end)
+
+	local clearEv = ReplicatedStorage:FindFirstChild("ClearEnemies")
+	if clearEv and clearEv:IsA("BindableEvent") then pcall(function() clearEv:Fire() end) end
+
+	fireCinematic("TransitionIn")
+
+	task.spawn(function()
+		task.wait(0.35)
+		if _G.ResetExtraction then pcall(_G.ResetExtraction) end
+
+		closeDoor()
+		teleportToVote()
+		freezeAllPlayers(true)
+
+		GameState.currentLevel += 1
+		startVotingPhase()
+		freezeAllPlayers(false)
+
+		task.wait(1)
+		fireCinematic("TransitionOut")
+		roundTransitionInProgress = false
+	end)
+end
+
+PlayerEscapedEventObj.OnServerEvent:Connect(function(player)
+	if GameState.state ~= "QuotaMet" then return end
+	GameState.escapedPlayers[player] = true
+	print(string.format("[LEVEL CONTROLLER] %s escaped!", player.Name))
+
+	local allDone = true
+	for _, p in ipairs(Players:GetPlayers()) do
+		local isDead = p.Character and p.Character:FindFirstChild("Humanoid")
+			and p.Character.Humanoid.Health <= 0
+		if not p:GetAttribute("Spectating") and not isDead
+			and not GameState.escapedPlayers[p] and not GameState.deadPlayers[p] then
+			allDone = false; break
+		end
+	end
+	if allDone then advanceRound() end
+end)
+
+local function hookEscapeBindable(name)
+	local ev = ReplicatedStorage:FindFirstChild(name) or ensureBindable(name)
+	if ev:IsA("BindableEvent") then
+		ev.Event:Connect(function()
+			if GameState.state == "QuotaMet" then advanceRound() end
+		end)
+	end
+	ReplicatedStorage.ChildAdded:Connect(function(child)
+		if child.Name == name and child:IsA("BindableEvent") then
+			child.Event:Connect(function()
+				if GameState.state == "QuotaMet" then advanceRound() end
+			end)
+		end
+	end)
+end
+hookEscapeBindable("PlayerEscapedServer")
+hookEscapeBindable("PlayerEscapedServerBindable")
+
+Players.PlayerAdded:Connect(function(player)
+	-- Teleport to Vote when character spawns, but only during voting phases
+	-- (during gameplay they'll be spectating — handled later)
+	player.CharacterAdded:Connect(function(character)
+		local hum = character:WaitForChild("Humanoid")
+		local hrp = character:WaitForChild("HumanoidRootPart")
+
+		-- Small wait so character physics settle before teleporting
+		task.wait(0.1)
+
+		local state = GameState.MAIN_STATE
+		if state == "Start" or state == "Voting" then
+			hrp.CFrame = getVoteCFrame()
+			print(string.format("[LEVEL CONTROLLER] New join: teleported %s to Vote", player.Name))
+		else
+			-- In game — spectating placeholder (just send to Vote for now,
+			-- proper spectating will be added later)
+			hrp.CFrame = getVoteCFrame()
+			player:SetAttribute("Spectating", true)
+			print(string.format("[LEVEL CONTROLLER] Mid-game join: %s set to spectating", player.Name))
+		end
+
+		hum.Died:Connect(function()
+			if GameState.state == "QuotaMet" then
+				GameState.deadPlayers[player] = true
+				print(string.format("[LEVEL CONTROLLER] %s died", player.Name))
+			end
+		end)
+	end)
+end)
+
+-- ========================================
+-- GAME START
+-- ========================================
+local function startGame()
+	print("[LEVEL CONTROLLER] Game starting!")
+	GameState.currentLevel = 1
+	if MoneyManager and type(MoneyManager.ResetCoins) == "function" then
+		MoneyManager:ResetCoins()
+	end
+	startVotingPhase()
+end
+
+_G.StartGameFromPedestal = function(player)
+	print("[LEVEL CONTROLLER] Start requested by", player.Name)
+	if GameState.MAIN_STATE == "Start" and GameState.SUBSTATE == "WaitingForStart" then
+		startGame()
+	else
+		warn("[LEVEL CONTROLLER] Cannot start — wrong state:", GameState.MAIN_STATE, GameState.SUBSTATE)
+	end
+end
+
+StartLevelEvent.OnServerEvent:Connect(function(player, level)
+	GameState.currentLevel = level or 1; startGame()
+end)
+
+_G.StartLevel = function(level)
+	GameState.currentLevel = level or 1; startGame()
+end
+
+-- ========================================
+-- INIT
+-- ========================================
+pcall(function() math.randomseed(tick()); math.random(); math.random(); math.random() end)
+print("[LEVEL CONTROLLER] Initialized")
+broadcastState()
+
+-- Teleport any players already in the server to Vote on init
+-- (handles Studio testing where players load before the script runs)
+task.defer(function()
+	teleportToVote()
+end)
+
+return GameState
