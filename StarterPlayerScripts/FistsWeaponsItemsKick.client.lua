@@ -619,7 +619,6 @@ local function equipItem(itemName)
 	baseActivePos = basePos
 	currentItem   = itemName
 
-	pickupRemote:FireServer(itemName)
 	transitioning = false
 end
 

@@ -657,6 +657,11 @@ local function startCollapsePhase()
 		}) end)
 
 	startMapBreakdown()
+	task.delay(1.5, function()
+		if GameState.state == "QuotaMet" then
+			advanceRound()
+		end
+	end)
 end
 
 if QuotaMetEventObj:IsA("BindableEvent") then

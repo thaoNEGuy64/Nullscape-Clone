@@ -33,6 +33,7 @@ local UpdateScoreHudRE = getOrCreateRemote("UpdateScoreHud")
 local QuotaSetEvent = getOrCreateBindable("QuotaSet")
 local ResetScoreEvent = getOrCreateBindable("ResetScore")
 local QuotaMetEvent = getOrCreateBindable("QuotaMetEvent")
+local ArtifactDepositedEvent = getOrCreateBindable("ArtifactDeposited")
 
 local state = {
 	artifacts = 0,
@@ -93,7 +94,7 @@ local function applyMomentumOnCollect(now)
 	state.lastCollectTime = now
 end
 
-ItemPickupRE.OnServerEvent:Connect(function(player, itemName)
+local function registerCollect(player)
 	if not state.active then return end
 	if player and player:GetAttribute("IsDead") then return end
 
@@ -104,6 +105,14 @@ ItemPickupRE.OnServerEvent:Connect(function(player, itemName)
 	state.teamScore = math.floor(state.artifacts * state.multi)
 	broadcast()
 	maybeTriggerQuota()
+end
+
+ItemPickupRE.OnServerEvent:Connect(function(player, itemName)
+	registerCollect(player)
+end)
+
+ArtifactDepositedEvent.Event:Connect(function(player, itemName)
+	registerCollect(player)
 end)
 
 QuotaSetEvent.Event:Connect(function(quota)

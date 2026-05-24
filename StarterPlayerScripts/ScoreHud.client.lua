@@ -29,6 +29,26 @@ local shown = false
 local mainState = "Start"
 local substate = "WaitingForStart"
 
+local quotaCelebrate = false
+local quotaCelebrateStart = 0
+
+local function playQuotaMetAnim()
+	quotaCelebrate = true
+	quotaCelebrateStart = os.clock()
+	task.delay(1.0, function()
+		for _, label in ipairs(labels) do
+			local p = basePos[label]
+			TweenService:Create(label, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+				Position = UDim2.new(p.X.Scale, p.X.Offset, p.Y.Scale - 0.25, p.Y.Offset - 50),
+			}):Play()
+		end
+		task.delay(0.46, function()
+			quotaCelebrate = false
+			if not shown then setVisible(false) end
+		end)
+	end)
+end
+
 local function setVisible(visible)
 	scoreGui.Enabled = true
 	for _, label in ipairs(labels) do
@@ -84,16 +104,20 @@ end
 
 UpdateScoreHudRE.OnClientEvent:Connect(function(payload)
 	if type(payload) ~= "table" then return end
-	artifactsLabel.Text = string.format("Artifacts: %d", math.floor(payload.artifacts or 0))
-	multiLabel.Text = string.format("Multi: x%.2f", tonumber(payload.multi or 1))
-	teamScoreLabel.Text = string.format("Team Score: %d", math.floor(payload.teamScore or 0))
-	quotaLabel.Text = string.format("Quota: %d", math.floor(payload.quota or 0))
+	artifactsLabel.Text = string.format("%d", math.floor(payload.artifacts or 0))
+	multiLabel.Text = string.format("x%.2f", tonumber(payload.multi or 1))
+	teamScoreLabel.Text = string.format("%d", math.floor(payload.teamScore or 0))
+	quotaLabel.Text = string.format("%d", math.floor(payload.quota or 0))
 
 	if shouldShowHud(payload.active) then animateShow() else animateHide() end
 end)
 
 StateChangedRE.OnClientEvent:Connect(function(newMain)
 	mainState = tostring(newMain)
+	if mainState == "QuotaMet" then
+		playQuotaMetAnim()
+		return
+	end
 	if shouldShowHud(false) then animateShow() else animateHide() end
 end)
 
@@ -105,10 +129,14 @@ end)
 RunService.RenderStepped:Connect(function()
 	if not shown then return end
 	local t = os.clock()
+	local shakeScale = 1
+	if quotaCelebrate then
+		shakeScale = 3
+	end
 	for i, label in ipairs(labels) do
 		local p = basePos[label]
-		local ox = math.sin(t * 1.1 + i * 0.9) * 2
-		local oy = math.cos(t * 0.9 + i * 1.3) * 1.5
+		local ox = math.sin(t * 1.1 + i * 0.9) * 2 * shakeScale
+		local oy = math.cos(t * 0.9 + i * 1.3) * 1.5 * shakeScale
 		label.Position = UDim2.new(p.X.Scale, p.X.Offset + ox, p.Y.Scale, p.Y.Offset + oy)
 	end
 end)
