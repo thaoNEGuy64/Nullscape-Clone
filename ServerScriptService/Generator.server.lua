@@ -13,7 +13,9 @@ local ProgressEvent = ReplicatedStorage:FindFirstChild("UpdateGenerationProgress
 local ItemsFolder = ReplicatedStorage:FindFirstChild("Items")
 
 local DREAM_ORIGIN = CFrame.new(0, 1500, 0)
-local DEFAULT_QUOTA = 1
+local function calcQuota(level)
+	return math.max(1, math.floor(level or 1))
+end
 
 local generationId = 0
 
@@ -108,7 +110,7 @@ local function runGeneration(level)
 	if not dreamTemplate then
 		warn("[DreamGen] No dream models found in ReplicatedStorage/Dreams")
 		ReplicatedStorage:SetAttribute("GenDone", true)
-		GenCompleteEvent:Fire(level, DEFAULT_QUOTA)
+		GenCompleteEvent:Fire(level, quota)
 		return
 	end
 
@@ -171,7 +173,8 @@ local function runGeneration(level)
 	ReplicatedStorage:SetAttribute("DreamPodLobbyCFrame", nil)
 	ReplicatedStorage:SetAttribute("GenDone", true)
 
-	pcall(function() QuotaSetEvent:Fire(DEFAULT_QUOTA, level) end)
+	local quota = calcQuota(level)
+	pcall(function() QuotaSetEvent:Fire(quota, level) end)
 	if ProgressEvent then ProgressEvent:FireAllClients(1, 1) end
 
 	print(string.format("[DreamGen] Loaded dream '%s' with %d PortalHere marker(s). Pod landing reserved at %s",
@@ -188,7 +191,7 @@ local function runGeneration(level)
 		LandingCFrame = landingCFrame,
 		Quota = DEFAULT_QUOTA,
 	})
-	GenCompleteEvent:Fire(level, DEFAULT_QUOTA)
+	GenCompleteEvent:Fire(level, quota)
 end
 
 local TriggerGeneration = ReplicatedStorage:FindFirstChild("TriggerGeneration")

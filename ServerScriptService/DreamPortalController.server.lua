@@ -41,13 +41,14 @@ local function clearFrames()
 	table.clear(activeFrames)
 end
 
-local function getActiveDream()
+local function getDreams()
 	local folder = Workspace:FindFirstChild("GeneratedDreams")
-	if not folder then return nil end
+	if not folder then return {} end
+	local dreams = {}
 	for _, child in ipairs(folder:GetChildren()) do
-		if child:IsA("Model") then return child end
+		if child:IsA("Model") then table.insert(dreams, child) end
 	end
-	return nil
+	return dreams
 end
 
 local function applyDreamPicture(frameModel, dreamName)
@@ -118,8 +119,12 @@ end
 
 local function rebuildPortals()
 	clearFrames()
-	local dream = getActiveDream()
-	if not dream then return end
+	local dreams = getDreams()
+	if #dreams < 2 then
+		print("[DreamPortal] Skipping portal spawn (need 2+ dreams)")
+		return
+	end
+	local dream = dreams[1]
 	local frameTemplate = findPath(ReplicatedStorage, FRAME_MODEL_PATH)
 	if not frameTemplate or not frameTemplate:IsA("Model") then
 		warn("[DreamPortal] Missing ReplicatedStorage/Assets/Picture Frame model")
@@ -127,7 +132,7 @@ local function rebuildPortals()
 	end
 	local markers = {}
 	for _, d in ipairs(dream:GetDescendants()) do
-		if d:IsA("BasePart") and d.Name == MARKER_NAME then
+		if d:IsA("BasePart") and d.Name == MARKER_NAME and d:GetAttribute("ReservedForPod") ~= true then
 			table.insert(markers, d)
 		end
 	end

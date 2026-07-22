@@ -36,8 +36,8 @@ end
 local roomTemplate = nil
 local latestBackDoor = nil
 local usedConnectParts = {}
-local isPlaced = false
 local wiredPedestal = nil
+local wirePedestal
 
 SetHeldItemRE.OnServerEvent:Connect(function(player, itemName)
 	if not player then return end
@@ -140,7 +140,7 @@ end
 local function startBob(part)
 	task.spawn(function()
 		local base = part.CFrame
-		while part.Parent and isPlaced do
+		while part.Parent and part:GetAttribute("DepositedArtifact") == true do
 			local up = TweenService:Create(part, TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), { CFrame = base * CFrame.new(0, 0.45, 0) })
 			up:Play(); up.Completed:Wait()
 			local down = TweenService:Create(part, TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), { CFrame = base * CFrame.new(0, -0.45, 0) })
@@ -159,8 +159,7 @@ local function attachNextRoomFromBackDoor()
 end
 
 local function onPedestalClicked(player)
-	if isPlaced then return end
-	if not player or not player.Parent then return end
+		if not player or not player.Parent then return end
 	local held = player:GetAttribute("HeldItem")
 	if type(held) ~= "string" or held == "" then
 		warn("[ArtifactDeposit] Click ignored: no HeldItem on", player.Name)
@@ -196,16 +195,18 @@ local function onPedestalClicked(player)
 	artifact.CFrame = clickPart.CFrame * CFrame.new(0, clickPart.Size.Y * 0.5 + artifact.Size.Y * 0.5 + 0.15, 0)
 	artifact.Parent = clickPart.Parent
 
-	isPlaced = true
+	artifact:SetAttribute("DepositedArtifact", true)
 	player:SetAttribute("HeldItem", nil)
 	ItemDepositRE:FireClient(player, held)
 	ArtifactDepositedEvent:Fire(player, held)
 	startBob(artifact)
 	attachNextRoomFromBackDoor()
+	wiredPedestal = nil
+	wirePedestal()
 	print("[ArtifactDeposit] Deposited", held)
 end
 
-local function wirePedestal()
+wirePedestal = function()
 	if wiredPedestal and wiredPedestal.Parent then return end
 	local clickPart = findPedestalClickPart()
 	if not clickPart then

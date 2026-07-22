@@ -708,7 +708,6 @@ advanceRound = function()
 
 		closeDoor()
 		resetAllPlayerHealth("advanceRound")
-		teleportToVote()
 		freezeAllPlayers(true)
 
 		GameState.currentLevel += 1
