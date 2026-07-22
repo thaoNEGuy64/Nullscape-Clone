@@ -124,31 +124,50 @@ local function rebuildPortals()
 		print("[DreamPortal] Skipping portal spawn (need 2+ dreams)")
 		return
 	end
-	local dream = dreams[1]
 	local frameTemplate = findPath(ReplicatedStorage, FRAME_MODEL_PATH)
 	if not frameTemplate or not frameTemplate:IsA("Model") then
 		warn("[DreamPortal] Missing ReplicatedStorage/Assets/Picture Frame model")
 		return
 	end
-	local markers = {}
-	for _, d in ipairs(dream:GetDescendants()) do
-		if d:IsA("BasePart") and d.Name == MARKER_NAME and d:GetAttribute("ReservedForPod") ~= true then
-			table.insert(markers, d)
+
+	local byDream = {}
+	for _, dream in ipairs(dreams) do
+		byDream[dream] = {}
+		for _, d in ipairs(dream:GetDescendants()) do
+			if d:IsA("BasePart") and d.Name == MARKER_NAME and d:GetAttribute("ReservedForPod") ~= true then
+				table.insert(byDream[dream], d)
+			end
 		end
 	end
-	for i, marker in ipairs(markers) do
-		local frame = frameTemplate:Clone()
-		frame.Name = "DreamPortalFrame_" .. i
-		frame.Parent = dream
-		frame:PivotTo(cframeFromPart(marker))
-		applyDreamPicture(frame, dream.Name)
-		activeFrames[#activeFrames+1] = {model = frame, marker = marker, phase = i * 0.9}
-	end
 
-	for i, entry in ipairs(activeFrames) do
-		local pairIndex = (i % #activeFrames) + 1
-		entry.paired = activeFrames[pairIndex]
-		wirePortalTouch(entry)
+	local id = 0
+	for i = 1, #dreams - 1 do
+		local a, b = dreams[i], dreams[i + 1]
+		local ma = table.remove(byDream[a], 1)
+		local mb = table.remove(byDream[b], 1)
+		if ma and mb then
+			id += 1
+			local fa = frameTemplate:Clone()
+			fa.Name = "DreamPortalFrame_" .. id .. "A"
+			fa.Parent = a
+			fa:PivotTo(cframeFromPart(ma))
+			applyDreamPicture(fa, b:GetAttribute("DreamName") or b.Name)
+			local ea = {model = fa, marker = ma, phase = id * 0.9}
+			table.insert(activeFrames, ea)
+
+			local fb = frameTemplate:Clone()
+			fb.Name = "DreamPortalFrame_" .. id .. "B"
+			fb.Parent = b
+			fb:PivotTo(cframeFromPart(mb))
+			applyDreamPicture(fb, a:GetAttribute("DreamName") or a.Name)
+			local eb = {model = fb, marker = mb, phase = id * 1.1}
+			table.insert(activeFrames, eb)
+
+			ea.paired = eb
+			eb.paired = ea
+			wirePortalTouch(ea)
+			wirePortalTouch(eb)
+		end
 	end
 
 	print(string.format("[DreamPortal] Spawned %d portal frame(s)", #activeFrames))

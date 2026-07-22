@@ -14,7 +14,9 @@ local ItemsFolder = ReplicatedStorage:FindFirstChild("Items")
 
 local DREAM_ORIGIN = CFrame.new(0, 1500, 0)
 local function calcQuota(level)
-	return math.max(1, math.floor(level or 1))
+	level = math.max(1, math.floor(level or 1))
+	local artifactCount = level
+	return math.ceil(artifactCount * 10 * (0.8 + level * 0.05))
 end
 
 local generationId = 0
@@ -106,20 +108,31 @@ local function runGeneration(level)
 	spawnedItems.Name = "SpawnedItems"
 	spawnedItems.Parent = Workspace
 
-	local dreamTemplate = chooseDream()
-	if not dreamTemplate then
+	local allDreamTemplates = {}
+	for _, d in ipairs(DreamsFolder:GetChildren()) do
+		if d:IsA("Model") then table.insert(allDreamTemplates, d) end
+	end
+	if #allDreamTemplates == 0 then
 		warn("[DreamGen] No dream models found in ReplicatedStorage/Dreams")
 		ReplicatedStorage:SetAttribute("GenDone", true)
-		GenCompleteEvent:Fire(level, quota)
+		local q = calcQuota(level)
+		GenCompleteEvent:Fire(level, q)
 		return
 	end
 
-	local dream = dreamTemplate:Clone()
-	dream.Name = dreamTemplate.Name
-	dream:SetAttribute("DreamName", dreamTemplate.Name)
-	dream:SetAttribute("DreamLevel", level)
-	dream.Parent = generatedDreams
-	dream:PivotTo(DREAM_ORIGIN)
+	local dreamCount = math.max(1, level)
+	local dreams = {}
+	for i = 1, dreamCount do
+		local template = allDreamTemplates[((i - 1) % #allDreamTemplates) + 1]
+		local dream = template:Clone()
+		dream.Name = string.format("%s_%d", template.Name, i)
+		dream:SetAttribute("DreamName", template.Name)
+		dream:SetAttribute("DreamLevel", level)
+		dream.Parent = generatedDreams
+		dream:PivotTo(DREAM_ORIGIN + Vector3.new((i-1) * 1400, 0, 0))
+		table.insert(dreams, dream)
+	end
+	local dream = dreams[1]
 
 	-- Older arena/enemy code mostly scans GeneratedRooms children, so place a soft
 	-- reference marker there and keep the real map under GeneratedDreams.
@@ -129,17 +142,23 @@ local function runGeneration(level)
 	dreamMarker:SetAttribute("IsDreamReference", true)
 	dreamMarker.Parent = generatedRooms
 
-	local itemMarkers = getMarkerParts(dream, "ItemHere")
-	if ItemsFolder and #itemMarkers > 0 then
+	local quota = calcQuota(level)
+	local allMarkers = {}
+	for _, d in ipairs(dreams) do
+		for _, m in ipairs(getMarkerParts(d, "ItemHere")) do table.insert(allMarkers, m) end
+	end
+	if ItemsFolder and #allMarkers > 0 then
 		local template = ItemsFolder:FindFirstChild("Paper") or ItemsFolder:FindFirstChildWhichIsA("BasePart")
 		if template then
-			local spawnedItems = Instance.new("Folder")
-			spawnedItems.Name = "DreamArtifacts"
-			spawnedItems.Parent = dream
-			for i, markerPart in ipairs(itemMarkers) do
+			local itemsFolder = Instance.new("Folder")
+			itemsFolder.Name = "DreamArtifacts"
+			itemsFolder.Parent = Workspace:FindFirstChild("SpawnedItems") or spawnedItems
+			local toSpawn = math.min(quota, #allMarkers)
+			for i = 1, toSpawn do
+				local markerPart = allMarkers[i]
 				local container = Instance.new("Model")
 				container.Name = "Paper"
-				container.Parent = spawnedItems
+				container.Parent = itemsFolder
 				local clone = template:Clone()
 				clone.CFrame = markerPart.CFrame * CFrame.new(0, markerPart.Size.Y * 0.5 + clone.Size.Y * 0.5, 0)
 				clone.Parent = container
@@ -152,7 +171,7 @@ local function runGeneration(level)
 				trigger.CanCollide = false
 				trigger.Parent = container
 			end
-			print(string.format("[DreamGen] Spawned %d artifact pickup(s) from ItemHere", #itemMarkers))
+			print(string.format("[DreamGen] Spawned %d artifact pickup(s) from ItemHere", toSpawn))
 		else
 			warn("[DreamGen] Missing Items/Paper template for ItemHere spawn")
 		end
@@ -167,21 +186,16 @@ local function runGeneration(level)
 	local landingCFrame = landingMarker and (landingMarker.CFrame * CFrame.new(0, landingMarker.Size.Y * 0.5, 0)) or dream:GetPivot()
 	if landingMarker then hideReservedPortalMarker(landingMarker) end
 
-	ReplicatedStorage:SetAttribute("ActiveDreamName", dream.Name)
+	ReplicatedStorage:SetAttribute("ActiveDreamName", dream:GetAttribute("DreamName") or dream.Name)
 	ReplicatedStorage:SetAttribute("ActiveDreamLevel", level)
 	ReplicatedStorage:SetAttribute("DreamPodLandingCFrame", landingCFrame)
 	ReplicatedStorage:SetAttribute("DreamPodLobbyCFrame", nil)
 	ReplicatedStorage:SetAttribute("GenDone", true)
 
-	local quota = calcQuota(level)
 	pcall(function() QuotaSetEvent:Fire(quota, level) end)
 	if ProgressEvent then ProgressEvent:FireAllClients(1, 1) end
 
-	print(string.format("[DreamGen] Loaded dream '%s' with %d PortalHere marker(s). Pod landing reserved at %s",
-		dream.Name,
-		#portalMarkers,
-		tostring(landingCFrame.Position)
-	))
+	print(string.format("[DreamGen] Loaded %d dream(s). Primary '%s' has %d PortalHere marker(s).", #dreams, dream.Name, #portalMarkers))
 
 	if generationId ~= myGenerationId then return end
 	DreamPodReadyEvent:Fire({
@@ -189,7 +203,7 @@ local function runGeneration(level)
 		DreamName = dream.Name,
 		Level = level,
 		LandingCFrame = landingCFrame,
-		Quota = DEFAULT_QUOTA,
+		Quota = quota,
 	})
 	GenCompleteEvent:Fire(level, quota)
 end

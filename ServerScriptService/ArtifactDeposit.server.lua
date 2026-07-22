@@ -123,7 +123,7 @@ local function findPedestalClickPart()
 			if pedestal then
 				local fallback = nil
 				for _, inst in ipairs(pedestal:GetDescendants()) do
-					if inst:IsA("BasePart") then
+					if inst:IsA("BasePart") and inst.Transparency < 0.99 then
 						fallback = fallback or inst
 						if inst:FindFirstChildOfClass("ClickDetector") then
 							return inst
