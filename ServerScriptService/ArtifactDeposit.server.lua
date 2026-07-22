@@ -69,6 +69,7 @@ end
 local function cloneAndAttachRoom(targetDoorPart)
 	if not roomTemplate or not targetDoorPart or not targetDoorPart:IsA("BasePart") then return nil end
 	local room = roomTemplate:Clone()
+	room.Name = "Room"
 	room.Parent = Workspace
 	local frontDoor = room:FindFirstChild("FrontDoor", true)
 	if not frontDoor or not frontDoor:IsA("BasePart") then
@@ -117,7 +118,7 @@ end
 
 local function findPedestalClickPart()
 	for _, model in ipairs(Workspace:GetChildren()) do
-		if model:IsA("Model") and model.Name ~= "RoomTemplateRuntime" then
+		if model:IsA("Model") then
 			local pedestal = model:FindFirstChild("Pedastal", true) or model:FindFirstChild("Pedestal", true)
 			if pedestal then
 				local fallback = nil
@@ -161,17 +162,31 @@ local function onPedestalClicked(player)
 	if isPlaced then return end
 	if not player or not player.Parent then return end
 	local held = player:GetAttribute("HeldItem")
-	if type(held) ~= "string" or held == "" then return end
+	if type(held) ~= "string" or held == "" then
+		warn("[ArtifactDeposit] Click ignored: no HeldItem on", player.Name)
+		return
+	end
 
 	local templateFolder = ReplicatedStorage:FindFirstChild("Items")
 	local template = templateFolder and templateFolder:FindFirstChild(held)
+	if not (template and template:IsA("BasePart")) and templateFolder then
+		for _, obj in ipairs(templateFolder:GetChildren()) do
+			if obj:IsA("BasePart") then
+				template = obj
+				break
+			end
+		end
+	end
 	if not template or not template:IsA("BasePart") then
-		warn("[ArtifactDeposit] Missing item template for", held)
+		warn("[ArtifactDeposit] No artifact template available in ReplicatedStorage.Items")
 		return
 	end
 
 	local clickPart = wiredPedestal and wiredPedestal.Parent and wiredPedestal or findPedestalClickPart()
-	if not clickPart then return end
+	if not clickPart then
+		warn("[ArtifactDeposit] No pedestal part found to wire")
+		return
+	end
 
 	local artifact = template:Clone()
 	artifact.Anchored = true
@@ -191,7 +206,10 @@ end
 local function wirePedestal()
 	if wiredPedestal and wiredPedestal.Parent then return end
 	local clickPart = findPedestalClickPart()
-	if not clickPart then return end
+	if not clickPart then
+		warn("[ArtifactDeposit] No pedestal part found to wire")
+		return
+	end
 	local cd = clickPart:FindFirstChildOfClass("ClickDetector")
 	if not cd then
 		cd = Instance.new("ClickDetector")
