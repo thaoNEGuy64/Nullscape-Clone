@@ -708,6 +708,13 @@ local function pickupWeapon(weaponId, pickupModelName)
 		return false
 	end
 
+	for _, existing in ipairs(weaponSlots) do
+		if existing and existing.id == def.id then
+			print(string.format("[WEAPON] Already carrying %s", def.displayName or def.id))
+			return false
+		end
+	end
+
 	-- Find first empty slot
 	for i = 1, 3 do
 		if not weaponSlots[i] then

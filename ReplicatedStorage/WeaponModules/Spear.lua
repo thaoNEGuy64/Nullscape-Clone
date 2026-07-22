@@ -2,6 +2,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 
 local WEAPON_ID = "Spear"
 local GUI_NAME = "SpearWeaponGuiLocal"
@@ -10,6 +11,8 @@ local returnConnection = nil
 local lastRestore = nil
 local consumedSlot = nil
 local throwing = false
+local guiAnimConn = nil
+local guiBasePosition = nil
 
 local function findPath(root, path)
 	local current = root
@@ -24,10 +27,37 @@ local function getActionRemote()
 	return findPath(ReplicatedStorage, {"Weapon Remotes", "Spear", "SpearAction"})
 end
 
+local function stopGuiAnim()
+	if guiAnimConn then
+		guiAnimConn:Disconnect()
+		guiAnimConn = nil
+	end
+	guiBasePosition = nil
+end
+
 local function clearGui(player)
+	stopGuiAnim()
 	local pg = player and player:FindFirstChild("PlayerGui")
 	local old = pg and pg:FindFirstChild(GUI_NAME)
 	if old then old:Destroy() end
+end
+
+local function startGuiAnim(gui)
+	stopGuiAnim()
+	local image = gui:FindFirstChildWhichIsA("ImageLabel", true)
+	if not image then return end
+	guiBasePosition = image.Position
+	local t = 0
+	guiAnimConn = RunService.RenderStepped:Connect(function(dt)
+		if not image.Parent then stopGuiAnim(); return end
+		t += dt
+		local x = math.sin(t * 3.6) * 8
+		local y = math.sin(t * 7.2) * 5
+		image.Position = UDim2.new(
+			guiBasePosition.X.Scale, guiBasePosition.X.Offset + x,
+			guiBasePosition.Y.Scale, guiBasePosition.Y.Offset + y
+		)
+	end)
 end
 
 local function ensureReturnListener(remote)
@@ -50,13 +80,14 @@ return {
 	onEquip = function(ctx)
 		local player = ctx.player or Players.LocalPlayer
 		clearGui(player)
-		local template = findPath(ReplicatedStorage, {"Assets", "Weapons", "Spear", "Spear ScreenGui"})
+		local template = findPath(ReplicatedStorage, {"Assets", "Weapons", "Spear", "SpearGui"})
 		local pg = player and player:FindFirstChild("PlayerGui")
 		if template and template:IsA("ScreenGui") and pg then
 			local gui = template:Clone()
 			gui.Name = GUI_NAME
 			gui.ResetOnSpawn = false
 			gui.Parent = pg
+			startGuiAnim(gui)
 		end
 	end,
 

@@ -9,8 +9,8 @@ local Debris = game:GetService("Debris")
 
 local DAMAGE = 100
 local THROW_SPEED = 165
-local KNOCKBACK_SPEED = 85
-local KNOCKBACK_UP_BONUS = 8
+local KNOCKBACK_SPEED = 1700
+local KNOCKBACK_UP_BONUS = 80
 local MAX_OUT_TIME = 10
 local SLOWDOWN_TIME = 1.0
 local RETURN_TIME = 0.85
@@ -51,6 +51,37 @@ local function cleanProjectileClone(projectile)
 	projectile.CanCollide = false
 	projectile.CanTouch = false
 	projectile.CanQuery = false
+end
+
+local function addThrowTrail(projectile)
+	local halfZ = math.max(projectile.Size.Z * 0.5, 0.5)
+	local a0 = Instance.new("Attachment")
+	a0.Name = "SpearTrailFront"
+	a0.Position = Vector3.new(0, 0, -halfZ)
+	a0.Parent = projectile
+
+	local a1 = Instance.new("Attachment")
+	a1.Name = "SpearTrailBack"
+	a1.Position = Vector3.new(0, 0, halfZ)
+	a1.Parent = projectile
+
+	local trail = Instance.new("Trail")
+	trail.Name = "SpearRedTrail"
+	trail.Attachment0 = a0
+	trail.Attachment1 = a1
+	trail.Color = ColorSequence.new(Color3.fromRGB(255, 30, 30), Color3.fromRGB(255, 130, 60))
+	trail.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.05),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	trail.Lifetime = 0.35
+	trail.MinLength = 0.1
+	trail.LightEmission = 1
+	trail.WidthScale = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1.3),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	trail.Parent = projectile
 end
 
 local function findHealthTarget(inst)
@@ -131,13 +162,19 @@ local function throwSpear(player, lookVector)
 	local projectile = template:Clone()
 	projectile.Name = "ThrownSpear"
 	cleanProjectileClone(projectile)
+	projectile.Transparency = math.min(projectile.Transparency, 0)
+	addThrowTrail(projectile)
 	projectile.Parent = Workspace
 	local pos = hrp.Position + Vector3.new(0, 1.5, 0) + dir * 4
 	projectile.CFrame = lookCFrame(pos, dir)
 	Debris:AddItem(projectile, MAX_OUT_TIME + SLOWDOWN_TIME + RETURN_TIME + 5)
 	activeThrows[player] = projectile
 
-	hrp.AssemblyLinearVelocity += (-dir * KNOCKBACK_SPEED) + Vector3.new(0, KNOCKBACK_UP_BONUS, 0)
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	local airborne = humanoid and humanoid.FloorMaterial == Enum.Material.Air
+	if airborne then
+		hrp.AssemblyLinearVelocity += (-dir * KNOCKBACK_SPEED) + Vector3.new(0, KNOCKBACK_UP_BONUS, 0)
+	end
 
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
@@ -159,7 +196,7 @@ local function throwSpear(player, lookVector)
 				local alpha = math.clamp(slowElapsed / SLOWDOWN_TIME, 0, 1)
 				speed = THROW_SPEED * (1 - alpha)
 				pos += dir * speed * slowDt
-				projectile.CFrame = lookCFrame(pos, dir)
+				projectile.CFrame = lookCFrame(pos, dir) * CFrame.Angles(0, 0, elapsed * 18)
 			end
 			returning = true
 			break
