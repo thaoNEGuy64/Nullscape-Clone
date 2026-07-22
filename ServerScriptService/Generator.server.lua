@@ -20,6 +20,20 @@ local function calcQuota(level)
 end
 
 local generationId = 0
+local rng = Random.new()
+
+local function shuffle(list)
+	for i = #list, 2, -1 do
+		local j = rng:NextInteger(1, i)
+		list[i], list[j] = list[j], list[i]
+	end
+	return list
+end
+
+local function chooseRandom(list)
+	if #list == 0 then return nil end
+	return list[rng:NextInteger(1, #list)]
+end
 
 local function getOrCreateBindable(name)
 	local ev = ReplicatedStorage:FindFirstChild(name)
@@ -76,7 +90,7 @@ local function chooseDream()
 		end
 	end
 	if #candidates == 0 then return nil end
-	return candidates[math.random(1, #candidates)]
+	return chooseRandom(candidates)
 end
 
 local function hideReservedPortalMarker(marker)
@@ -121,19 +135,25 @@ local function runGeneration(level)
 	end
 
 	local dreamCount = math.max(1, level)
+	local templatePool = table.clone(allDreamTemplates)
+	shuffle(templatePool)
 	local dreams = {}
 	for i = 1, dreamCount do
-		local template = allDreamTemplates[((i - 1) % #allDreamTemplates) + 1]
+		if #templatePool == 0 then
+			templatePool = table.clone(allDreamTemplates)
+			shuffle(templatePool)
+		end
+		local template = table.remove(templatePool, 1)
 		local dream = template:Clone()
 		dream.Name = string.format("%s_%d", template.Name, i)
 		dream:SetAttribute("DreamName", template.Name)
 		dream:SetAttribute("DreamLevel", level)
 		dream:SetAttribute("DreamIndex", i)
 		dream.Parent = generatedDreams
-		dream:PivotTo(DREAM_ORIGIN + Vector3.new((i-1) * 1400, 0, 0))
+		dream:PivotTo(DREAM_ORIGIN + Vector3.new((i - 1) * 1400, 0, 0))
 		table.insert(dreams, dream)
 	end
-	local dream = dreams[1]
+	local dream = chooseRandom(dreams) or dreams[1]
 
 	-- Older arena/enemy code mostly scans GeneratedRooms children, so place a soft
 	-- reference marker there and keep the real map under GeneratedDreams.
@@ -144,20 +164,41 @@ local function runGeneration(level)
 	dreamMarker.Parent = generatedRooms
 
 	local quota = calcQuota(level)
-	local allMarkers = {}
+	local markersByDream = {}
+	local dreamsWithMarkers = {}
+	local extraMarkers = {}
 	for _, d in ipairs(dreams) do
-		for _, m in ipairs(getMarkerParts(d, "ItemHere")) do table.insert(allMarkers, m) end
+		local markers = getMarkerParts(d, "ItemHere")
+		shuffle(markers)
+		markersByDream[d] = markers
+		if #markers > 0 then table.insert(dreamsWithMarkers, d) end
 	end
-	if ItemsFolder and #allMarkers > 0 then
+	shuffle(dreamsWithMarkers)
+
+	local artifactMarkers = {}
+	local artifactCount = level
+	for _, d in ipairs(dreamsWithMarkers) do
+		if #artifactMarkers >= artifactCount then break end
+		local marker = table.remove(markersByDream[d], 1)
+		if marker then table.insert(artifactMarkers, marker) end
+	end
+	for _, d in ipairs(dreamsWithMarkers) do
+		for _, marker in ipairs(markersByDream[d]) do table.insert(extraMarkers, marker) end
+	end
+	shuffle(extraMarkers)
+	while #artifactMarkers < artifactCount and #extraMarkers > 0 do
+		table.insert(artifactMarkers, table.remove(extraMarkers, 1))
+	end
+
+	if ItemsFolder and #artifactMarkers > 0 then
 		local template = ItemsFolder:FindFirstChild("Paper") or ItemsFolder:FindFirstChildWhichIsA("BasePart")
 		if template then
 			local itemsFolder = Instance.new("Folder")
 			itemsFolder.Name = "DreamArtifacts"
 			itemsFolder.Parent = Workspace:FindFirstChild("SpawnedItems") or spawnedItems
-			local artifactCount = level
-			local toSpawn = math.min(artifactCount, #allMarkers)
+			local toSpawn = #artifactMarkers
 			for i = 1, toSpawn do
-				local markerPart = allMarkers[i]
+				local markerPart = artifactMarkers[i]
 				local container = Instance.new("Model")
 				container.Name = "Paper"
 				container.Parent = itemsFolder
@@ -180,6 +221,7 @@ local function runGeneration(level)
 	end
 
 	local portalMarkers = getMarkerParts(dream, "PortalHere")
+	shuffle(portalMarkers)
 	if #portalMarkers == 0 then
 		warn("[DreamGen] Dream '" .. dream.Name .. "' has no PortalHere parts; using dream pivot as pod landing")
 	end
@@ -223,5 +265,4 @@ TriggerGeneration.Event:Connect(function(level)
 	end)
 end)
 
-pcall(function() math.randomseed(tick()); math.random(); math.random(); math.random() end)
 print("[DreamGen] Ready — waiting for TriggerGeneration.")

@@ -15,6 +15,20 @@ local FRAME_HEIGHT = 9
 local FRAME_FORWARD_OFFSET = 0
 local FLOAT_AMPLITUDE = 0.55
 local TOUCH_COOLDOWN = 1.0
+local rng = Random.new()
+
+local function shuffle(list)
+	for i = #list, 2, -1 do
+		local j = rng:NextInteger(1, i)
+		list[i], list[j] = list[j], list[i]
+	end
+	return list
+end
+
+local function popRandom(list)
+	if #list == 0 then return nil end
+	return table.remove(list, rng:NextInteger(1, #list))
+end
 
 local function findPath(root, path)
 	local cur = root
@@ -148,11 +162,46 @@ local function rebuildPortals()
 		end
 	end
 
+	for _, markers in pairs(byDream) do
+		shuffle(markers)
+	end
+
+	local pairsToBuild = {}
+	local unconnected = table.clone(dreams)
+	shuffle(unconnected)
+	local connected = { popRandom(unconnected) }
+
+	-- First make a randomized spanning tree so every dream can be reached,
+	-- instead of always wiring dream 1 -> 2 -> 3 in list order.
+	while #unconnected > 0 do
+		local b = popRandom(unconnected)
+		local a = connected[rng:NextInteger(1, #connected)]
+		if #byDream[a] > 0 and #byDream[b] > 0 then
+			table.insert(pairsToBuild, { a = a, b = b, ma = popRandom(byDream[a]), mb = popRandom(byDream[b]) })
+		end
+		table.insert(connected, b)
+	end
+
+	-- Use extra PortalHere markers as optional branches between random different
+	-- dreams, so maps with 3+ markers can create more than one route.
+	local safety = 0
+	while safety < 100 do
+		safety += 1
+		local candidates = {}
+		for _, dream in ipairs(dreams) do
+			if #byDream[dream] > 0 then table.insert(candidates, dream) end
+		end
+		if #candidates < 2 then break end
+		local a = popRandom(candidates)
+		local b = popRandom(candidates)
+		if a and b and a ~= b then
+			table.insert(pairsToBuild, { a = a, b = b, ma = popRandom(byDream[a]), mb = popRandom(byDream[b]) })
+		end
+	end
+
 	local id = 0
-	for i = 1, #dreams - 1 do
-		local a, b = dreams[i], dreams[i + 1]
-		local ma = table.remove(byDream[a], 1)
-		local mb = table.remove(byDream[b], 1)
+	for _, pair in ipairs(pairsToBuild) do
+		local a, b, ma, mb = pair.a, pair.b, pair.ma, pair.mb
 		if ma and mb then
 			id += 1
 			local fa = frameTemplate:Clone()
@@ -160,7 +209,7 @@ local function rebuildPortals()
 			fa.Parent = a
 			fa:PivotTo(cframeFromPart(ma))
 			applyDreamPicture(fa, b:GetAttribute("DreamName") or b.Name)
-			local ea = {model = fa, marker = ma, phase = id * 0.9}
+			local ea = {model = fa, marker = ma, phase = rng:NextNumber(0, math.pi * 2)}
 			table.insert(activeFrames, ea)
 
 			local fb = frameTemplate:Clone()
@@ -168,7 +217,7 @@ local function rebuildPortals()
 			fb.Parent = b
 			fb:PivotTo(cframeFromPart(mb))
 			applyDreamPicture(fb, a:GetAttribute("DreamName") or a.Name)
-			local eb = {model = fb, marker = mb, phase = id * 1.1}
+			local eb = {model = fb, marker = mb, phase = rng:NextNumber(0, math.pi * 2)}
 			table.insert(activeFrames, eb)
 
 			ea.paired = eb
@@ -178,7 +227,7 @@ local function rebuildPortals()
 		end
 	end
 
-	print(string.format("[DreamPortal] Spawned %d portal frame(s)", #activeFrames))
+	print(string.format("[DreamPortal] Spawned %d portal frame(s) across %d portal pair(s)", #activeFrames, id))
 end
 
 local DreamPodReady = ReplicatedStorage:FindFirstChild("DreamPodReady")
