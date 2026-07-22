@@ -1,26 +1,30 @@
 -- DreamPodController.server.lua
 -- ServerScriptService
--- Handles the mining-cage pod (Workspace.car1) that carries players between
--- the voting area and the currently generated dream map.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
+local Debris = game:GetService("Debris")
 
 local CART_NAME = "car1"
+local STOP_HERE_NAME = "StopHere"
+
 local OCCUPANT_HOLD_TIME = 0.45
 local CART_ROOM_PADDING = Vector3.new(4, 6, 4)
-local CART_PLAYER_OFFSET = Vector3.new(0, 4, 0)
+local CART_PLAYER_OFFSET = Vector3.new(0, 0, 0)
+
 local LANDING_CLEARANCE = 0.25
 local LIFT_HEIGHT = 46
 local DROP_HEIGHT = 105
 local LIFT_TIME = 1.45
-local DROP_TIME = 2.65
-local RETURN_DROP_TIME = 2.0
+local RETURN_RISE_TIME = 2.0
 local FADE_IN_TIME = 0.7
 local FADE_OUT_TIME = 1.05
+
+local PART_FADE_TIME  = 1.5
+local POST_IMPACT_WAIT = 10
 
 local function getOrCreateRemote(name)
 	local remote = ReplicatedStorage:FindFirstChild(name)
@@ -42,11 +46,11 @@ local function getOrCreateBindable(name)
 	return ev
 end
 
-local PodFade = getOrCreateRemote("PodFade")
-local DreamPodReady = getOrCreateBindable("DreamPodReady")
-local DreamPodArrived = getOrCreateBindable("DreamPodArrived")
+local PodFade          = getOrCreateRemote("PodFade")
+local PodImpact        = getOrCreateRemote("PodImpact")
+local DreamPodReady    = getOrCreateBindable("DreamPodReady")
+local DreamPodArrived  = getOrCreateBindable("DreamPodArrived")
 local DreamPodReturned = getOrCreateBindable("DreamPodReturned")
-local QuotaMetEvent = getOrCreateBindable("QuotaMetEvent")
 
 local cart = Workspace:WaitForChild(CART_NAME, 20)
 if not cart then
@@ -54,53 +58,249 @@ if not cart then
 	return
 end
 
-local lobbyCFrame = cart:GetPivot()
+local stopHerePart = Workspace:WaitForChild(STOP_HERE_NAME, 20)
+if not stopHerePart then
+	warn("[DreamPod] Missing Workspace." .. STOP_HERE_NAME .. "; pod travel disabled")
+	return
+end
+
+local cartTemplate = cart:Clone()
+cartTemplate.Name   = CART_NAME .. "_Template"
+cartTemplate.Parent = ReplicatedStorage
+for _, d in ipairs(cartTemplate:GetDescendants()) do
+	if d:IsA("BasePart") then
+		d.Anchored     = true
+		d.CanCollide   = false
+		d.Transparency = 1
+	end
+end
+
+local function getCartParts()
+	local parts = {}
+	for _, d in ipairs(cart:GetDescendants()) do
+		if d:IsA("BasePart") then
+			table.insert(parts, d)
+		end
+	end
+	return parts
+end
+
+local function getCartBottomY()
+	local lowest = math.huge
+	for _, part in ipairs(getCartParts()) do
+		local bottom = part.Position.Y - part.Size.Y * 0.5
+		if bottom < lowest then lowest = bottom end
+	end
+	return lowest == math.huge and 0 or lowest
+end
+
+local function getCartCenter()
+	local parts = getCartParts()
+	if #parts == 0 then return Vector3.zero end
+	local minX, maxX = math.huge, -math.huge
+	local minY, maxY = math.huge, -math.huge
+	local minZ, maxZ = math.huge, -math.huge
+	for _, part in ipairs(parts) do
+		local p, s = part.Position, part.Size * 0.5
+		if p.X-s.X<minX then minX=p.X-s.X end; if p.X+s.X>maxX then maxX=p.X+s.X end
+		if p.Y-s.Y<minY then minY=p.Y-s.Y end; if p.Y+s.Y>maxY then maxY=p.Y+s.Y end
+		if p.Z-s.Z<minZ then minZ=p.Z-s.Z end; if p.Z+s.Z>maxZ then maxZ=p.Z+s.Z end
+	end
+	return Vector3.new((minX+maxX)*0.5, (minY+maxY)*0.5, (minZ+maxZ)*0.5)
+end
+
+local function moveCartByDeltaY(deltaY)
+	if math.abs(deltaY) < 0.0001 then return end
+	for _, part in ipairs(getCartParts()) do
+		part.CFrame = part.CFrame + Vector3.new(0, deltaY, 0)
+	end
+end
+
+local function teleportCart(targetBottomY, targetX, targetZ)
+	local parts = getCartParts()
+	if #parts == 0 then return end
+	local minX, maxX = math.huge, -math.huge
+	local minY       = math.huge
+	local minZ, maxZ = math.huge, -math.huge
+	for _, part in ipairs(parts) do
+		local p, s = part.Position, part.Size * 0.5
+		if p.X-s.X<minX then minX=p.X-s.X end; if p.X+s.X>maxX then maxX=p.X+s.X end
+		if p.Y-s.Y<minY then minY=p.Y-s.Y end
+		if p.Z-s.Z<minZ then minZ=p.Z-s.Z end; if p.Z+s.Z>maxZ then maxZ=p.Z+s.Z end
+	end
+	local delta = Vector3.new(
+		targetX - (minX+maxX)*0.5,
+		targetBottomY - minY,
+		targetZ - (minZ+maxZ)*0.5
+	)
+	for _, part in ipairs(parts) do
+		part.CFrame = part.CFrame + delta
+	end
+end
+
+local function snapPlayerToCart(player)
+	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+	local center = getCartCenter()
+	hrp.CFrame = CFrame.new(center + CART_PLAYER_OFFSET)
+end
+
+local function tweenCartY(targetBottomY, duration, easingStyle, easingDirection)
+	local startY = getCartBottomY()
+	if math.abs(targetBottomY - startY) < 0.001 then return end
+
+	local value = Instance.new("NumberValue")
+	value.Value = startY
+
+	local lastY = startY
+	local conn = value:GetPropertyChangedSignal("Value"):Connect(function()
+		local delta = value.Value - lastY
+		lastY = value.Value
+		moveCartByDeltaY(delta)
+	end)
+
+	local tween = TweenService:Create(
+		value,
+		TweenInfo.new(duration, easingStyle or Enum.EasingStyle.Sine, easingDirection or Enum.EasingDirection.InOut),
+		{ Value = targetBottomY }
+	)
+	tween:Play()
+	tween.Completed:Wait()
+
+	conn:Disconnect()
+	value:Destroy()
+
+	local snap = targetBottomY - getCartBottomY()
+	if math.abs(snap) > 0.001 then moveCartByDeltaY(snap) end
+end
+
 local landingCFrame = nil
-local dreamReady = false
-local traveling = false
-local available = false
-local cartLocation = "Lobby" -- Lobby/Dream
+local dreamReady    = false
+local traveling     = false
+local available     = false
+local cartLocation  = "Pit"
+
 local occupantCandidate = nil
-local occupantSince = 0
+local occupantSince     = 0
 
-local highlight = Instance.new("Highlight")
-highlight.Name = "DreamPodReadyHighlight"
-highlight.Adornee = cart
-highlight.FillTransparency = 0.75
-highlight.OutlineTransparency = 0
-highlight.FillColor = Color3.fromRGB(255, 230, 130)
-highlight.OutlineColor = Color3.fromRGB(255, 245, 180)
-highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-highlight.Enabled = false
-highlight.Parent = cart
+local pitBottomY   = getCartBottomY()
+local lobbyBottomY = nil
 
-local function setHighlighted(enabled)
-	highlight.Enabled = enabled and available and not traveling
+local wreckageParts = {}
+
+local function smashCart()
+	local parts = getCartParts()
+	local center = getCartCenter()
+	wreckageParts = {}
+
+	local explosion = Instance.new("Explosion")
+	explosion.Position      = center
+	explosion.BlastRadius   = 14
+	explosion.BlastPressure = 0
+	explosion.DestroyJointRadiusPercent = 0
+	explosion.Parent = Workspace
+	Debris:AddItem(explosion, 3)
+
+	for _, part in ipairs(parts) do
+		part.Parent = Workspace
+
+		part.Anchored   = false
+		part.CanCollide = true
+
+		local dir = (part.Position - center)
+		if dir.Magnitude < 0.1 then
+			dir = Vector3.new(math.random() - 0.5, 0.5, math.random() - 0.5)
+		end
+		dir = dir.Unit
+
+		local lateralSpeed = math.random(120, 220)
+		local upSpeed      = math.random(80, 160)
+		local impulse = Vector3.new(
+			dir.X * lateralSpeed,
+			upSpeed,
+			dir.Z * lateralSpeed
+		)
+		part:ApplyImpulse(impulse * part:GetMass())
+
+		table.insert(wreckageParts, part)
+	end
+end
+
+local function fadeWreckage()
+	for _, part in ipairs(wreckageParts) do
+		if not part or not part.Parent then continue end
+		part.Anchored   = true
+		part.CanCollide = false
+		TweenService:Create(
+			part,
+			TweenInfo.new(PART_FADE_TIME, Enum.EasingStyle.Linear),
+			{ Transparency = 1 }
+		):Play()
+		Debris:AddItem(part, PART_FADE_TIME + 0.1)
+	end
+	wreckageParts = {}
+end
+
+local function spawnReplacementCart(targetBottomY, targetX, targetZ)
+	fadeWreckage()
+
+	if cart and cart.Parent then
+		cart:Destroy()
+	end
+
+	local newCart = cartTemplate:Clone()
+	newCart.Name   = CART_NAME
+	newCart.Parent = Workspace
+
+	for _, d in ipairs(newCart:GetChildren()) do
+		if d:IsA("BasePart") then
+			d.Anchored     = true
+			d.CanCollide   = true
+			d.Transparency = 0
+		end
+	end
+	for _, d in ipairs(newCart:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.Anchored     = true
+			d.CanCollide   = true
+			d.Transparency = 0
+		end
+	end
+
+	cart = newCart
+
+	local dropFromY = targetBottomY + 40
+	teleportCart(dropFromY, targetX, targetZ)
+	tweenCartY(targetBottomY, RETURN_RISE_TIME, Enum.EasingStyle.Exponential, Enum.EasingDirection.Out)
 end
 
 local function setAvailable(enabled)
 	available = enabled
-	setHighlighted(enabled)
 end
 
-local function getCartBounds()
-	local cf, size
-	if cart:IsA("Model") then
-		cf, size = cart:GetBoundingBox()
-	elseif cart:IsA("BasePart") then
-		cf, size = cart.CFrame, cart.Size
-	else
-		cf, size = cart:GetPivot(), Vector3.new(12, 12, 12)
+local function getCartBoundsCenter()
+	local parts = getCartParts()
+	if #parts == 0 then return Vector3.zero, Vector3.new(12,12,12) end
+	local minX, maxX = math.huge, -math.huge
+	local minY, maxY = math.huge, -math.huge
+	local minZ, maxZ = math.huge, -math.huge
+	for _, part in ipairs(parts) do
+		local p, s = part.Position, part.Size * 0.5
+		if p.X-s.X<minX then minX=p.X-s.X end; if p.X+s.X>maxX then maxX=p.X+s.X end
+		if p.Y-s.Y<minY then minY=p.Y-s.Y end; if p.Y+s.Y>maxY then maxY=p.Y+s.Y end
+		if p.Z-s.Z<minZ then minZ=p.Z-s.Z end; if p.Z+s.Z>maxZ then maxZ=p.Z+s.Z end
 	end
-	return cf, size + CART_ROOM_PADDING
+	local center = Vector3.new((minX+maxX)*0.5,(minY+maxY)*0.5,(minZ+maxZ)*0.5)
+	local size   = Vector3.new(maxX-minX,maxY-minY,maxZ-minZ) + CART_ROOM_PADDING
+	return center, size
 end
 
 local function pointInsideCart(point)
-	local cf, size = getCartBounds()
-	local lp = cf:PointToObjectSpace(point)
-	return math.abs(lp.X) <= size.X * 0.5
-		and math.abs(lp.Y) <= size.Y * 0.5
-		and math.abs(lp.Z) <= size.Z * 0.5
+	local center, size = getCartBoundsCenter()
+	local d = point - center
+	return math.abs(d.X) <= size.X*0.5
+		and math.abs(d.Y) <= size.Y*0.5
+		and math.abs(d.Z) <= size.Z*0.5
 end
 
 local function getPlayerRoot(player)
@@ -112,69 +312,9 @@ local function getFirstOccupant()
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player:GetAttribute("IsDead") then continue end
 		local hrp = getPlayerRoot(player)
-		if hrp and pointInsideCart(hrp.Position) then
-			return player
-		end
+		if hrp and pointInsideCart(hrp.Position) then return player end
 	end
 	return nil
-end
-
-local function putPlayerInCart(player)
-	local hrp = getPlayerRoot(player)
-	if not hrp then return end
-	hrp.AssemblyLinearVelocity = Vector3.zero
-	hrp.CFrame = cart:GetPivot() * CFrame.new(CART_PLAYER_OFFSET)
-end
-
-local function getCartBottomOffset()
-	local pivot = cart:GetPivot()
-	local cf, size
-	if cart:IsA("Model") then
-		cf, size = cart:GetBoundingBox()
-	elseif cart:IsA("BasePart") then
-		cf, size = cart.CFrame, cart.Size
-	else
-		return CART_PLAYER_OFFSET.Y
-	end
-	local bottomY = cf.Position.Y - size.Y * 0.5
-	return math.max(0, pivot.Position.Y - bottomY) + LANDING_CLEARANCE
-end
-
-local function getCartOnTopOf(topCFrame)
-	local targetPosition = topCFrame.Position + Vector3.new(0, getCartBottomOffset(), 0)
-	return CFrame.new(targetPosition) * (topCFrame - topCFrame.Position)
-end
-
-local function lockPassenger(player)
-	local hrp = getPlayerRoot(player)
-	if not hrp then return nil end
-	local state = {
-		player = player,
-		hrp = hrp,
-		anchored = hrp.Anchored,
-	}
-	hrp.AssemblyLinearVelocity = Vector3.zero
-	hrp.Anchored = true
-	putPlayerInCart(player)
-	return state
-end
-
-local function updatePassengerRide(state)
-	if not state or not state.player.Parent then return end
-	local hrp = getPlayerRoot(state.player)
-	if not hrp then return end
-	state.hrp = hrp
-	hrp.AssemblyLinearVelocity = Vector3.zero
-	hrp.CFrame = cart:GetPivot() * CFrame.new(CART_PLAYER_OFFSET)
-end
-
-local function unlockPassenger(state)
-	if not state then return end
-	updatePassengerRide(state)
-	if state.hrp and state.hrp.Parent then
-		state.hrp.AssemblyLinearVelocity = Vector3.zero
-		state.hrp.Anchored = state.anchored
-	end
 end
 
 local function waitUntilPlayerLeaves(player)
@@ -191,32 +331,14 @@ local function waitUntilPlayerLeaves(player)
 	end
 end
 
-local function pivotCartTo(cf)
-	cart:PivotTo(cf)
-end
-
-local function tweenCartPivot(targetCFrame, duration, easingStyle, easingDirection, passengerState)
-	local value = Instance.new("CFrameValue")
-	value.Value = cart:GetPivot()
-	local conn = value:GetPropertyChangedSignal("Value"):Connect(function()
-		if cart and cart.Parent then
-			pivotCartTo(value.Value)
-			updatePassengerRide(passengerState)
-		end
-	end)
-	local tween = TweenService:Create(value, TweenInfo.new(duration, easingStyle or Enum.EasingStyle.Sine, easingDirection or Enum.EasingDirection.InOut), {
-		Value = targetCFrame,
-	})
-	tween:Play()
-	tween.Completed:Wait()
-	conn:Disconnect()
-	value:Destroy()
-	pivotCartTo(targetCFrame)
-	updatePassengerRide(passengerState)
-end
-
 local function fade(player, mode, duration)
 	PodFade:FireClient(player, mode, duration)
+end
+
+local function raiseCartToStopHere()
+	local targetBottomY = stopHerePart.Position.Y + LANDING_CLEARANCE
+	tweenCartY(targetBottomY, LIFT_TIME, Enum.EasingStyle.Exponential, Enum.EasingDirection.Out)
+	lobbyBottomY = getCartBottomY()
 end
 
 local function travelToDream(player)
@@ -225,32 +347,51 @@ local function travelToDream(player)
 	setAvailable(false)
 	print("[DreamPod] Taking", player.Name, "to dream")
 
-	local passengerState = lockPassenger(player)
-	local liftTarget = cart:GetPivot() + Vector3.new(0, LIFT_HEIGHT, 0)
-	task.delay(math.max(0.1, LIFT_TIME - FADE_IN_TIME * 0.85), function()
-		if traveling then fade(player, "In", FADE_IN_TIME) end
-	end)
-	tweenCartPivot(liftTarget, LIFT_TIME, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, passengerState)
-	task.wait(0.08)
+	fade(player, "In", FADE_IN_TIME)
+	local downTargetY = getCartBottomY() - LIFT_HEIGHT
+	tweenCartY(downTargetY, LIFT_TIME, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
 
-	local dreamCartCFrame = getCartOnTopOf(landingCFrame)
-	local dropStart = dreamCartCFrame + Vector3.new(0, DROP_HEIGHT, 0)
-	pivotCartTo(dropStart)
-	updatePassengerRide(passengerState)
+	local remaining = FADE_IN_TIME - LIFT_TIME
+	if remaining > 0 then task.wait(remaining) end
+
+	local dreamBottomY = landingCFrame.Position.Y + LANDING_CLEARANCE
+	local dropStartY   = dreamBottomY + DROP_HEIGHT
+	teleportCart(dropStartY, landingCFrame.Position.X, landingCFrame.Position.Z)
+	snapPlayerToCart(player)
+
 	player:SetAttribute("EnteredLevel", true)
 	player:SetAttribute("Spectating", false)
 
 	fade(player, "Out", FADE_OUT_TIME)
-	tweenCartPivot(dreamCartCFrame, DROP_TIME, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, passengerState)
-	unlockPassenger(passengerState)
+
+	tweenCartY(dreamBottomY, 2.2, Enum.EasingStyle.Linear, Enum.EasingDirection.In)
+
+	smashCart()
+	PodImpact:FireClient(player)
+	print("[DreamPod] Cart smashed at dream floor")
 
 	cartLocation = "Dream"
-	traveling = false
-	DreamPodArrived:Fire(player, dreamCartCFrame)
+	traveling    = false
+	DreamPodArrived:Fire(player, landingCFrame)
+
+	local dreamX          = landingCFrame.Position.X
+	local dreamZ          = landingCFrame.Position.Z
+	local dreamFloorY     = landingCFrame.Position.Y + LANDING_CLEARANCE
+
+	task.delay(POST_IMPACT_WAIT, function()
+		print("[DreamPod] Spawning replacement cart at dream landing")
+		traveling = true
+		setAvailable(false)
+
+		spawnReplacementCart(dreamFloorY, dreamX, dreamZ)
+
+		cartLocation = "Dream"
+		traveling    = false
+		setAvailable(true)
+		print("[DreamPod] Replacement cart ready in dream — awaiting passenger")
+	end)
 
 	waitUntilPlayerLeaves(player)
-	setAvailable(true)
-	print("[DreamPod] Pod available for return")
 end
 
 local function travelToLobby(player)
@@ -259,25 +400,21 @@ local function travelToLobby(player)
 	setAvailable(false)
 	print("[DreamPod] Returning", player.Name, "to vote area")
 
-	local passengerState = lockPassenger(player)
-	local liftTarget = cart:GetPivot() + Vector3.new(0, LIFT_HEIGHT, 0)
-	task.delay(math.max(0.1, LIFT_TIME - FADE_IN_TIME * 0.85), function()
-		if traveling then fade(player, "In", FADE_IN_TIME) end
-	end)
-	tweenCartPivot(liftTarget, LIFT_TIME, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, passengerState)
-	task.wait(0.08)
+	fade(player, "In", FADE_IN_TIME)
+	task.wait(FADE_IN_TIME)
 
-	local dropStart = lobbyCFrame + Vector3.new(0, DROP_HEIGHT * 0.6, 0)
-	pivotCartTo(dropStart)
-	updatePassengerRide(passengerState)
+	local lobbyY = lobbyBottomY or (stopHerePart.Position.Y + LANDING_CLEARANCE)
+	local COSMETIC_DIP = 8
+	teleportCart(lobbyY - COSMETIC_DIP, stopHerePart.Position.X, stopHerePart.Position.Z)
+	snapPlayerToCart(player)
+
 	player:SetAttribute("EnteredLevel", false)
 
 	fade(player, "Out", FADE_OUT_TIME)
-	tweenCartPivot(lobbyCFrame, RETURN_DROP_TIME, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, passengerState)
-	unlockPassenger(passengerState)
+	tweenCartY(lobbyY, RETURN_RISE_TIME, Enum.EasingStyle.Exponential, Enum.EasingDirection.Out)
 
-	cartLocation = "Lobby"
-	traveling = false
+	cartLocation = "StopHere"
+	traveling    = false
 	DreamPodReturned:Fire(player)
 
 	waitUntilPlayerLeaves(player)
@@ -285,42 +422,35 @@ local function travelToLobby(player)
 	print("[DreamPod] Pod available in lobby")
 end
 
-local function pulseLiftDownForRoundEnd()
-	if traveling or cartLocation ~= "Lobby" or not cart or not cart.Parent then return end
-	local start = cart:GetPivot()
-	local lowered = start + Vector3.new(0, -12, 0)
-	tweenCartPivot(lowered, 0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, nil)
-	task.wait(0.2)
-	tweenCartPivot(start, 0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, nil)
-end
-
 DreamPodReady.Event:Connect(function(payload)
-	landingCFrame = payload and payload.LandingCFrame or ReplicatedStorage:GetAttribute("DreamPodLandingCFrame")
+	landingCFrame = payload and payload.LandingCFrame
+		or ReplicatedStorage:GetAttribute("DreamPodLandingCFrame")
+
 	if typeof(landingCFrame) ~= "CFrame" then
 		warn("[DreamPod] DreamPodReady fired without a landing CFrame")
 		dreamReady = false
 		setAvailable(false)
 		return
 	end
+
 	dreamReady = true
-	cartLocation = "Lobby"
-	pivotCartTo(lobbyCFrame)
+	moveCartByDeltaY(pitBottomY - getCartBottomY())
+	raiseCartToStopHere()
+	cartLocation = "StopHere"
 	setAvailable(true)
-	print(string.format("[DreamPod] Ready for dream '%s'", tostring(payload and payload.DreamName or ReplicatedStorage:GetAttribute("ActiveDreamName"))))
-end)
 
-QuotaMetEvent.Event:Connect(function()
-	task.spawn(pulseLiftDownForRoundEnd)
+	print(string.format("[DreamPod] Ready for dream '%s'",
+		tostring(payload and payload.DreamName or ReplicatedStorage:GetAttribute("ActiveDreamName"))))
 end)
-
 
 task.defer(function()
 	local existingLanding = ReplicatedStorage:GetAttribute("DreamPodLandingCFrame")
 	if ReplicatedStorage:GetAttribute("GenDone") == true and typeof(existingLanding) == "CFrame" then
 		landingCFrame = existingLanding
-		dreamReady = true
-		cartLocation = "Lobby"
-		pivotCartTo(lobbyCFrame)
+		dreamReady    = true
+		moveCartByDeltaY(pitBottomY - getCartBottomY())
+		raiseCartToStopHere()
+		cartLocation = "StopHere"
 		setAvailable(true)
 		print("[DreamPod] Recovered existing generated dream state")
 	end
@@ -329,28 +459,28 @@ end)
 RunService.Heartbeat:Connect(function()
 	if traveling or not available then
 		occupantCandidate = nil
-		occupantSince = 0
+		occupantSince     = 0
 		return
 	end
 
 	local occupant = getFirstOccupant()
 	if not occupant then
 		occupantCandidate = nil
-		occupantSince = 0
+		occupantSince     = 0
 		return
 	end
 
 	if occupant ~= occupantCandidate then
 		occupantCandidate = occupant
-		occupantSince = os.clock()
+		occupantSince     = os.clock()
 		return
 	end
 
 	if os.clock() - occupantSince < OCCUPANT_HOLD_TIME then return end
 	occupantCandidate = nil
-	occupantSince = 0
+	occupantSince     = 0
 
-	if cartLocation == "Lobby" then
+	if cartLocation == "StopHere" then
 		travelToDream(occupant)
 	else
 		travelToLobby(occupant)
