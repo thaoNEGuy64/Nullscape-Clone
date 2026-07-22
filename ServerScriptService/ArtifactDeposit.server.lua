@@ -117,14 +117,19 @@ end
 
 local function findPedestalClickPart()
 	for _, model in ipairs(Workspace:GetChildren()) do
-		if model:IsA("Model") and (model.Name == "Room" or model.Name == "RoomTemplateRuntime") == false then
+		if model:IsA("Model") and model.Name ~= "RoomTemplateRuntime" then
 			local pedestal = model:FindFirstChild("Pedastal", true) or model:FindFirstChild("Pedestal", true)
 			if pedestal then
+				local fallback = nil
 				for _, inst in ipairs(pedestal:GetDescendants()) do
-					if inst:IsA("BasePart") and inst:FindFirstChildOfClass("ClickDetector") then
-						return inst
+					if inst:IsA("BasePart") then
+						fallback = fallback or inst
+						if inst:FindFirstChildOfClass("ClickDetector") then
+							return inst
+						end
 					end
 				end
+				if fallback then return fallback end
 			end
 		end
 	end
