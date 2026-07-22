@@ -11,7 +11,9 @@ local Workspace = game:GetService("Workspace")
 local FRAME_MODEL_PATH = {"Assets", "Picture Frame"}
 local DREAM_PICS_PATH = {"Assets", "DreamPics"}
 local MARKER_NAME = "PortalHere"
-local FRAME_HEIGHT = 4
+local FRAME_HEIGHT = 9
+local FRAME_FORWARD_OFFSET = 0
+local FLOAT_AMPLITUDE = 0.55
 local TOUCH_COOLDOWN = 1.0
 
 local function findPath(root, path)
@@ -28,7 +30,10 @@ local function getBasePart(model)
 end
 
 local function cframeFromPart(part)
-	return CFrame.new(part.Position + Vector3.new(0, FRAME_HEIGHT, 0), part.Position + Vector3.new(0, FRAME_HEIGHT, 0) + part.CFrame.LookVector)
+	local pos = part.Position
+		+ Vector3.new(0, part.Size.Y * 0.5 + FRAME_HEIGHT, 0)
+		+ part.CFrame.LookVector * FRAME_FORWARD_OFFSET
+	return CFrame.new(pos, pos + part.CFrame.LookVector)
 end
 
 local activeFrames = {}
@@ -48,6 +53,9 @@ local function getDreams()
 	for _, child in ipairs(folder:GetChildren()) do
 		if child:IsA("Model") then table.insert(dreams, child) end
 	end
+	table.sort(dreams, function(a, b)
+		return (a:GetAttribute("DreamIndex") or 0) < (b:GetAttribute("DreamIndex") or 0)
+	end)
 	return dreams
 end
 
@@ -107,7 +115,7 @@ local function updateFloat(dt)
 	for _, entry in ipairs(activeFrames) do
 		if entry.model and entry.marker and entry.model.Parent then
 			local base = cframeFromPart(entry.marker)
-			local y = math.sin(floatTime * 1.4 + entry.phase) * 0.35
+			local y = math.sin(floatTime * 1.4 + entry.phase) * FLOAT_AMPLITUDE
 			local yaw = math.sin(floatTime * 0.8 + entry.phase) * math.rad(6)
 			entry.model:PivotTo(base * CFrame.new(0, y, 0) * CFrame.Angles(0, yaw, 0))
 			if entry.trigger then

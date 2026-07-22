@@ -510,7 +510,7 @@ local function startVotingPhase()
 	if ResetScoreEvent and ResetScoreEvent:IsA("BindableEvent") then
 		ResetScoreEvent:Fire(false)
 	end
-	teleportToVote()
+	-- Players should already be in the lobby/hub when voting restarts.
 	freezeAllPlayers(false)
 
 	if _G.UpdateLeftPedestal then _G.UpdateLeftPedestal("WaitingForStart", false) end

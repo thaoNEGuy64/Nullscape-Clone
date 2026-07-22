@@ -128,6 +128,7 @@ local function runGeneration(level)
 		dream.Name = string.format("%s_%d", template.Name, i)
 		dream:SetAttribute("DreamName", template.Name)
 		dream:SetAttribute("DreamLevel", level)
+		dream:SetAttribute("DreamIndex", i)
 		dream.Parent = generatedDreams
 		dream:PivotTo(DREAM_ORIGIN + Vector3.new((i-1) * 1400, 0, 0))
 		table.insert(dreams, dream)
@@ -153,7 +154,8 @@ local function runGeneration(level)
 			local itemsFolder = Instance.new("Folder")
 			itemsFolder.Name = "DreamArtifacts"
 			itemsFolder.Parent = Workspace:FindFirstChild("SpawnedItems") or spawnedItems
-			local toSpawn = math.min(quota, #allMarkers)
+			local artifactCount = level
+			local toSpawn = math.min(artifactCount, #allMarkers)
 			for i = 1, toSpawn do
 				local markerPart = allMarkers[i]
 				local container = Instance.new("Model")
