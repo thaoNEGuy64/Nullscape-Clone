@@ -106,6 +106,8 @@ local activeSlot     = nil               -- 1/2/3 or nil (nil = fists)
 local currentItem    = nil
 local activeWeaponDef = nil
 local weaponDefsById = {}
+local consumeActiveWeapon
+local restoreWeaponToSlot
 
 -- GUI handles (set in setupFists)
 local fistsGui, leftFist, rightFist
@@ -152,6 +154,8 @@ local function buildWeaponContext()
 		remotes = {
 			enemyDamage = enemyDamageRE,
 		},
+		consumeActiveWeapon = consumeActiveWeapon,
+		restoreWeapon = restoreWeaponToSlot,
 	}
 end
 
@@ -721,6 +725,51 @@ local function pickupWeapon(weaponId, pickupModelName)
 	end
 	print("[WEAPON] All slots full — throw one first (E)")
 	return false
+end
+
+consumeActiveWeapon = function()
+	if not activeSlot then return nil end
+	local slot = activeSlot
+	local weapon = weaponSlots[slot]
+	if not weapon then return nil end
+	unequipActiveWeapon()
+	weaponSlots[slot] = nil
+	activeSlot = nil
+	if fistsGui then fistsGui.Enabled = true end
+	showDefault()
+	printSlots()
+	return weapon, slot
+end
+
+restoreWeaponToSlot = function(weaponId, preferredSlot)
+	local def = weaponDefsById[weaponId]
+	if not def then
+		warn(string.format("[WEAPON] Cannot restore missing weapon id '%s'", tostring(weaponId)))
+		return false
+	end
+	local slot = preferredSlot
+	if type(slot) ~= "number" or slot < 1 or slot > #weaponSlots or weaponSlots[slot] then
+		slot = nil
+		for i = 1, #weaponSlots do
+			if not weaponSlots[i] then slot = i; break end
+		end
+	end
+	if not slot then
+		warn(string.format("[WEAPON] No empty slot to restore %s", def.displayName or def.id))
+		return false
+	end
+	weaponSlots[slot] = {
+		id = def.id,
+		def = def,
+		displayName = def.displayName or def.id,
+		pickupModelName = def.pickupModelName or def.id,
+	}
+	print(string.format("[WEAPON] %s returned → slot %d", def.displayName or def.id, slot))
+	if not activeSlot then
+		switchToSlot(slot)
+	end
+	printSlots()
+	return true
 end
 
 local function throwWeapon()
