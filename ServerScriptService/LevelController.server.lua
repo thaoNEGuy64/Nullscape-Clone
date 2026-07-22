@@ -362,6 +362,7 @@ local function isEvenLevel() return GameState.currentLevel % 2 == 0 end
 
 local startEnemyVoting, startCurseVoting, startUpgradeVoting, startLevelGeneration
 local beginGenerationSync
+local advanceRound
 
 local function getOptionTier(voteType, optionName)
 	if voteType == "Upgrade" and UpgradeManager and type(UpgradeManager.GetUpgradeData) == "function" then
@@ -689,7 +690,7 @@ elseif QuotaMetEventObj:IsA("RemoteEvent") then
 	end)
 end
 
-local function advanceRound()
+advanceRound = function()
 	if roundTransitionInProgress then return end
 	roundTransitionInProgress = true
 
