@@ -36,9 +36,11 @@ end
 
 local roomTemplate = nil
 local latestBackDoor = nil
-local connectPart = nil
+local connectAnchorCFrame = nil
+local connectAnchorName = nil
 local depositRooms = {}
 local wiredParts = {}
+local pendingArtifactCount = nil
 
 SetHeldItemRE.OnServerEvent:Connect(function(player, itemName)
 	if not player then return end
@@ -76,18 +78,54 @@ local function clearDepositRooms()
 	latestBackDoor = nil
 end
 
-local function getConnectPart()
-	if connectPart and connectPart.Parent then return connectPart end
-	local connect = Workspace:FindFirstChild("Connect")
-	if not connect then
-		connect = Workspace:WaitForChild("Connect", 30)
+local function isInDepositRoom(inst)
+	local current = inst
+	while current and current ~= Workspace do
+		if current:GetAttribute("DepositRoomClone") == true then
+			return true
+		end
+		current = current.Parent
 	end
-	if connect and connect:IsA("BasePart") then
-		connectPart = connect
-		return connectPart
+	return false
+end
+
+local function isInGeneratedContent(inst)
+	local current = inst
+	while current and current ~= Workspace do
+		if current.Name == "GeneratedDreams" or current.Name == "GeneratedRooms" or current.Name == "SpawnedItems" then
+			return true
+		end
+		current = current.Parent
 	end
-	warn("[ArtifactDeposit] Workspace.Connect was not found or is not a BasePart")
+	return false
+end
+
+local function findConnectPart()
+	local direct = Workspace:FindFirstChild("Connect")
+	if direct and direct:IsA("BasePart") then
+		return direct
+	end
+
+	for _, inst in ipairs(Workspace:GetDescendants()) do
+		if inst:IsA("BasePart") and inst.Name == "Connect" and not isInDepositRoom(inst) and not isInGeneratedContent(inst) then
+			return inst
+		end
+	end
 	return nil
+end
+
+local function getConnectAnchorCFrame()
+	if connectAnchorCFrame then
+		return connectAnchorCFrame, connectAnchorName or "cached Connect anchor"
+	end
+
+	local connect = findConnectPart()
+	if connect and connect:IsA("BasePart") then
+		connectAnchorCFrame = connect.CFrame
+		connectAnchorName = connect:GetFullName()
+		return connectAnchorCFrame, connectAnchorName
+	end
+	return nil, nil
 end
 
 local function hideTargetDoor(targetDoorPart)
@@ -116,8 +154,21 @@ local function sealBackDoor(room)
 	return replacement
 end
 
-local function cloneAndAttachRoom(targetDoorPart)
-	if not roomTemplate or not targetDoorPart or not targetDoorPart:IsA("BasePart") then return nil end
+local function cloneAndAttachRoom(targetDoorPartOrCFrame, targetName)
+	if not roomTemplate then return nil end
+
+	local targetCFrame = nil
+	local targetDoorPart = nil
+	if typeof(targetDoorPartOrCFrame) == "Instance" and targetDoorPartOrCFrame:IsA("BasePart") then
+		targetDoorPart = targetDoorPartOrCFrame
+		targetCFrame = targetDoorPart.CFrame
+		targetName = targetDoorPart:GetFullName()
+	elseif typeof(targetDoorPartOrCFrame) == "CFrame" then
+		targetCFrame = targetDoorPartOrCFrame
+		targetName = targetName or "cached Connect anchor"
+	end
+	if not targetCFrame then return nil end
+
 	local room = roomTemplate:Clone()
 	room.Name = "Room"
 	room:SetAttribute("DepositRoomClone", true)
@@ -130,7 +181,7 @@ local function cloneAndAttachRoom(targetDoorPart)
 	end
 
 	local pivot = room:GetPivot()
-	local delta = targetDoorPart.CFrame * frontDoor.CFrame:Inverse()
+	local delta = targetCFrame * frontDoor.CFrame:Inverse()
 	room:PivotTo(delta * pivot)
 
 	local frontAfter = room:FindFirstChild("FrontDoor", true)
@@ -138,10 +189,12 @@ local function cloneAndAttachRoom(targetDoorPart)
 		frontAfter:Destroy()
 	end
 
-	hideTargetDoor(targetDoorPart)
+	if targetDoorPart then
+		hideTargetDoor(targetDoorPart)
+	end
 	latestBackDoor = sealBackDoor(room)
 	table.insert(depositRooms, room)
-	print(string.format("[ArtifactDeposit] Attached deposit room #%d to %s", #depositRooms, targetDoorPart:GetFullName()))
+	print(string.format("[ArtifactDeposit] Attached deposit room #%d to %s", #depositRooms, tostring(targetName)))
 	return room
 end
 
@@ -150,17 +203,18 @@ local function buildDepositRoomChain(artifactCount)
 		warn("[ArtifactDeposit] Missing Workspace.Room template")
 		return
 	end
-	clearDepositRooms()
-
-	local target = getConnectPart()
+	local target, targetName = getConnectAnchorCFrame()
 	if not target then
-		warn("[ArtifactDeposit] Missing Workspace.Connect")
+		pendingArtifactCount = artifactCount
+		warn("[ArtifactDeposit] Missing Workspace.Connect; keeping any existing deposit rooms in place")
 		return
 	end
 
+	pendingArtifactCount = nil
+	clearDepositRooms()
 	artifactCount = math.max(1, math.floor(artifactCount or 1))
 	for i = 1, artifactCount do
-		local room = cloneAndAttachRoom(target)
+		local room = cloneAndAttachRoom(target, targetName)
 		if not room then
 			warn("[ArtifactDeposit] Failed to attach deposit room #" .. tostring(i))
 			break
@@ -168,6 +222,7 @@ local function buildDepositRoomChain(artifactCount)
 		-- The previous back door becomes the next target. If this is the last
 		-- room, it remains as a normal sealed Part so players don't see void.
 		target = latestBackDoor
+		targetName = latestBackDoor and latestBackDoor:GetFullName() or "missing BackDoor"
 	end
 
 	print(string.format("[ArtifactDeposit] Connected %d deposit room(s)", #depositRooms))
@@ -273,12 +328,25 @@ GenComplete.Event:Connect(function(level)
 	wirePedestals()
 end)
 
+
+Workspace.DescendantAdded:Connect(function(inst)
+	if pendingArtifactCount and inst:IsA("BasePart") and inst.Name == "Connect" and not isInDepositRoom(inst) and not isInGeneratedContent(inst) then
+		task.defer(function()
+			buildDepositRoomChain(pendingArtifactCount)
+			wirePedestals()
+		end)
+	end
+end)
+
 task.defer(function()
-	for attempt = 1, 6 do
-		buildDepositRoomChain(1)
+	-- Generation normally fires GenComplete every round. This fallback only
+	-- rebuilds if another script already completed generation before this script
+	-- connected, so it does not create late warnings while a player is picking up
+	-- the first artifact.
+	if ReplicatedStorage:GetAttribute("GenDone") == true then
+		local level = tonumber(ReplicatedStorage:GetAttribute("ActiveDreamLevel")) or 1
+		buildDepositRoomChain(level)
 		wirePedestals()
-		if #depositRooms > 0 then return end
-		task.wait(1)
 	end
 end)
 
