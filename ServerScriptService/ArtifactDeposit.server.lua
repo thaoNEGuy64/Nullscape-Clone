@@ -1,7 +1,6 @@
 -- ArtifactDeposit.server.lua
 -- ServerScriptService
--- Places the Room.FrontDoor onto Connect, converts BackDoor to a normal part,
--- and handles pedestal deposit using held artifacts.
+-- Connects Room models through FrontDoor->Connect/BackDoor and handles artifact pedestal deposits.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
@@ -18,12 +17,15 @@ local function getOrCreateRemote(name)
 end
 
 local ItemDepositRE = getOrCreateRemote("ItemDeposit")
+local SetHeldItemRE = getOrCreateRemote("SetHeldItem")
+
 local ArtifactDepositedEvent = ReplicatedStorage:FindFirstChild("ArtifactDeposited")
 if not ArtifactDepositedEvent or not ArtifactDepositedEvent:IsA("BindableEvent") then
 	ArtifactDepositedEvent = Instance.new("BindableEvent")
 	ArtifactDepositedEvent.Name = "ArtifactDeposited"
 	ArtifactDepositedEvent.Parent = ReplicatedStorage
 end
+
 local GenComplete = ReplicatedStorage:FindFirstChild("GenComplete")
 if not GenComplete or not GenComplete:IsA("BindableEvent") then
 	GenComplete = Instance.new("BindableEvent")
@@ -31,12 +33,24 @@ if not GenComplete or not GenComplete:IsA("BindableEvent") then
 	GenComplete.Parent = ReplicatedStorage
 end
 
-local rigged = false
+local roomTemplate = nil
+local latestBackDoor = nil
+local usedConnectParts = {}
 local isPlaced = false
+local wiredPedestal = nil
+
+SetHeldItemRE.OnServerEvent:Connect(function(player, itemName)
+	if not player then return end
+	if type(itemName) == "string" and itemName ~= "" then
+		player:SetAttribute("HeldItem", itemName)
+	else
+		player:SetAttribute("HeldItem", nil)
+	end
+end)
 
 local function convertBackDoor(room)
 	local backDoor = room:FindFirstChild("BackDoor", true)
-	if not backDoor or not backDoor:IsA("BasePart") then return end
+	if not backDoor or not backDoor:IsA("BasePart") then return nil end
 	local replacement = Instance.new("Part")
 	replacement.Name = backDoor.Name
 	replacement.Size = backDoor.Size
@@ -49,35 +63,69 @@ local function convertBackDoor(room)
 	replacement.CanCollide = true
 	replacement.Parent = backDoor.Parent
 	backDoor:Destroy()
+	return replacement
 end
 
-local function setupConnectionRoom()
-	if rigged then return end
-	local connect = Workspace:FindFirstChild("Connect")
-	local room = Workspace:FindFirstChild("Room")
-	if not connect or not connect:IsA("BasePart") or not room or not room:IsA("Model") then return end
-
+local function cloneAndAttachRoom(targetDoorPart)
+	if not roomTemplate or not targetDoorPart or not targetDoorPart:IsA("BasePart") then return nil end
+	local room = roomTemplate:Clone()
+	room.Parent = Workspace
 	local frontDoor = room:FindFirstChild("FrontDoor", true)
-	if frontDoor and frontDoor:IsA("BasePart") then
-		frontDoor.CFrame = connect.CFrame
-		frontDoor.Anchored = true
-		frontDoor.Parent = Workspace
-		connect:Destroy()
+	if not frontDoor or not frontDoor:IsA("BasePart") then
+		room:Destroy()
+		return nil
 	end
 
-	convertBackDoor(room)
-	rigged = true
-	print("[ArtifactDeposit] Room connected")
+	local pivot = room:GetPivot()
+	local delta = targetDoorPart.CFrame * frontDoor.CFrame:Inverse()
+	room:PivotTo(delta * pivot)
+
+	local frontAfter = room:FindFirstChild("FrontDoor", true)
+	if frontAfter and frontAfter:IsA("BasePart") then
+		frontAfter:Destroy()
+	end
+
+	local newBack = convertBackDoor(room)
+	latestBackDoor = newBack
+	return room
+end
+
+local function getConnectPart()
+	local connect = Workspace:FindFirstChild("Connect")
+	if connect and connect:IsA("BasePart") and not usedConnectParts[connect] then
+		usedConnectParts[connect] = true
+		return connect
+	end
+	return nil
+end
+
+local function setupInitialConnection()
+	if roomTemplate then return end
+	local room = Workspace:FindFirstChild("Room")
+	if not room or not room:IsA("Model") then return end
+	roomTemplate = room:Clone()
+	roomTemplate.Parent = ReplicatedStorage
+	roomTemplate.Name = "RoomTemplateRuntime"
+	room:Destroy()
+
+	local connect = getConnectPart()
+	if not connect then return end
+	cloneAndAttachRoom(connect)
+	connect:Destroy()
+	print("[ArtifactDeposit] Initial room connected")
 end
 
 local function findPedestalClickPart()
-	local room = Workspace:FindFirstChild("Room")
-	if not room then return nil end
-	local pedestal = room:FindFirstChild("Pedastal", true) or room:FindFirstChild("Pedestal", true)
-	if not pedestal then return nil end
-	for _, inst in ipairs(pedestal:GetDescendants()) do
-		if inst:IsA("BasePart") and inst:FindFirstChildOfClass("ClickDetector") then
-			return inst
+	for _, model in ipairs(Workspace:GetChildren()) do
+		if model:IsA("Model") and (model.Name == "Room" or model.Name == "RoomTemplateRuntime") == false then
+			local pedestal = model:FindFirstChild("Pedastal", true) or model:FindFirstChild("Pedestal", true)
+			if pedestal then
+				for _, inst in ipairs(pedestal:GetDescendants()) do
+					if inst:IsA("BasePart") and inst:FindFirstChildOfClass("ClickDetector") then
+						return inst
+					end
+				end
+			end
 		end
 	end
 	return nil
@@ -95,6 +143,15 @@ local function startBob(part)
 	end)
 end
 
+local function attachNextRoomFromBackDoor()
+	if not latestBackDoor or not latestBackDoor.Parent then return end
+	local nextRoom = cloneAndAttachRoom(latestBackDoor)
+	if nextRoom then
+		latestBackDoor:Destroy()
+		print("[ArtifactDeposit] Extended dream by one room")
+	end
+end
+
 local function onPedestalClicked(player)
 	if isPlaced then return end
 	if not player or not player.Parent then return end
@@ -108,7 +165,7 @@ local function onPedestalClicked(player)
 		return
 	end
 
-	local clickPart = findPedestalClickPart()
+	local clickPart = wiredPedestal and wiredPedestal.Parent and wiredPedestal or findPedestalClickPart()
 	if not clickPart then return end
 
 	local artifact = template:Clone()
@@ -122,10 +179,12 @@ local function onPedestalClicked(player)
 	ItemDepositRE:FireClient(player, held)
 	ArtifactDepositedEvent:Fire(player, held)
 	startBob(artifact)
+	attachNextRoomFromBackDoor()
 	print("[ArtifactDeposit] Deposited", held)
 end
 
 local function wirePedestal()
+	if wiredPedestal and wiredPedestal.Parent then return end
 	local clickPart = findPedestalClickPart()
 	if not clickPart then return end
 	local cd = clickPart:FindFirstChildOfClass("ClickDetector")
@@ -135,16 +194,17 @@ local function wirePedestal()
 	end
 	cd.MaxActivationDistance = 20
 	cd.MouseClick:Connect(onPedestalClicked)
+	wiredPedestal = clickPart
 	print("[ArtifactDeposit] Pedestal wired")
 end
 
 GenComplete.Event:Connect(function()
-	setupConnectionRoom()
+	setupInitialConnection()
 	wirePedestal()
 end)
 
 task.defer(function()
-	setupConnectionRoom()
+	setupInitialConnection()
 	wirePedestal()
 end)
 

@@ -35,6 +35,7 @@ local weaponModulesFolder = ReplicatedStorage:FindFirstChild("WeaponModules")
 
 -- ── Remotes ────────────────────────────────────────────────────
 local pickupRemote   = waitFor(ReplicatedStorage, "ItemPickup")
+local setHeldItemRemote = waitFor(ReplicatedStorage, "SetHeldItem")
 local depositRemote  = waitFor(ReplicatedStorage, "ItemDeposit")
 local enemyDamageRE  = waitFor(ReplicatedStorage, "EnemyDamage")  -- (enemyPart, damage)
 
@@ -618,6 +619,7 @@ local function equipItem(itemName)
 	activeRight   = rightLabel
 	baseActivePos = basePos
 	currentItem   = itemName
+	setHeldItemRemote:FireServer(itemName)
 
 	transitioning = false
 end
@@ -635,6 +637,7 @@ local function unequipItem()
 	activeItemGui = nil; activeRight = nil; baseActivePos = nil
 	currentItem   = nil
 	player:SetAttribute("HeldItem", nil)
+	setHeldItemRemote:FireServer(nil)
 
 	fistsGui.Enabled   = true
 	leftFist.Position  = UDim2.new(baseLeftPos.X.Scale,  baseLeftPos.X.Offset,  baseLeftPos.Y.Scale  + 0.5, baseLeftPos.Y.Offset)
