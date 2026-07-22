@@ -9,8 +9,9 @@ local Debris = game:GetService("Debris")
 
 local DAMAGE = 100
 local THROW_SPEED = 165
-local KNOCKBACK_SPEED = 1700
-local KNOCKBACK_UP_BONUS = 80
+local MIN_KNOCKBACK_SPEED = 550
+local MAX_KNOCKBACK_SPEED = 2400
+local KNOCKBACK_UP_BONUS = 120
 local MAX_OUT_TIME = 10
 local SLOWDOWN_TIME = 1.0
 local RETURN_TIME = 0.85
@@ -74,11 +75,11 @@ local function addThrowTrail(projectile)
 		NumberSequenceKeypoint.new(0, 0.05),
 		NumberSequenceKeypoint.new(1, 1),
 	})
-	trail.Lifetime = 0.35
+	trail.Lifetime = 0.85
 	trail.MinLength = 0.1
 	trail.LightEmission = 1
 	trail.WidthScale = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 1.3),
+		NumberSequenceKeypoint.new(0, 3.0),
 		NumberSequenceKeypoint.new(1, 0),
 	})
 	trail.Parent = projectile
@@ -104,6 +105,10 @@ end
 local function lookCFrame(pos, dir)
 	if dir.Magnitude < 0.001 then dir = Vector3.new(0, 0, -1) end
 	return CFrame.lookAt(pos, pos + dir.Unit)
+end
+
+local function spearCFrame(pos, dir, spinTime)
+	return lookCFrame(pos, dir) * CFrame.Angles(0, 0, (spinTime or 0) * 28)
 end
 
 local function quadraticBezier(a, b, c, t)
@@ -143,7 +148,7 @@ local function returnSpear(player, projectile, fromPos)
 	end
 end
 
-local function throwSpear(player, lookVector)
+local function throwSpear(player, lookVector, chargeAlpha)
 	if activeThrows[player] then return end
 	local char = player.Character
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -152,6 +157,7 @@ local function throwSpear(player, lookVector)
 		lookVector = hrp.CFrame.LookVector
 	end
 	local dir = lookVector.Unit
+	chargeAlpha = math.clamp(tonumber(chargeAlpha) or 0, 0, 1)
 	local template = getSpearTemplate()
 	if not template then
 		warn("[SPEAR] Missing ReplicatedStorage/Assets/Weapons/Spear/Spear BasePart")
@@ -166,14 +172,17 @@ local function throwSpear(player, lookVector)
 	addThrowTrail(projectile)
 	projectile.Parent = Workspace
 	local pos = hrp.Position + Vector3.new(0, 1.5, 0) + dir * 4
-	projectile.CFrame = lookCFrame(pos, dir)
+	projectile.CFrame = spearCFrame(pos, dir, 0)
 	Debris:AddItem(projectile, MAX_OUT_TIME + SLOWDOWN_TIME + RETURN_TIME + 5)
 	activeThrows[player] = projectile
 
 	local humanoid = char:FindFirstChildOfClass("Humanoid")
 	local airborne = humanoid and humanoid.FloorMaterial == Enum.Material.Air
 	if airborne then
-		hrp.AssemblyLinearVelocity += (-dir * KNOCKBACK_SPEED) + Vector3.new(0, KNOCKBACK_UP_BONUS, 0)
+		local knockbackSpeed = MIN_KNOCKBACK_SPEED + (MAX_KNOCKBACK_SPEED - MIN_KNOCKBACK_SPEED) * chargeAlpha
+		local impulse = (-dir * knockbackSpeed) + Vector3.new(0, KNOCKBACK_UP_BONUS * (0.35 + chargeAlpha), 0)
+		hrp.AssemblyLinearVelocity += impulse
+		SpearAction:FireClient(player, "Impulse", impulse)
 	end
 
 	local params = RaycastParams.new()
@@ -196,7 +205,7 @@ local function throwSpear(player, lookVector)
 				local alpha = math.clamp(slowElapsed / SLOWDOWN_TIME, 0, 1)
 				speed = THROW_SPEED * (1 - alpha)
 				pos += dir * speed * slowDt
-				projectile.CFrame = lookCFrame(pos, dir) * CFrame.Angles(0, 0, elapsed * 18)
+				projectile.CFrame = spearCFrame(pos, dir, elapsed)
 			end
 			returning = true
 			break
@@ -214,18 +223,18 @@ local function throwSpear(player, lookVector)
 				table.insert(raycastFilter, target)
 				params.FilterDescendantsInstances = raycastFilter
 				pos = result.Position + dir * 0.25
-				projectile.CFrame = lookCFrame(pos, dir)
+				projectile.CFrame = spearCFrame(pos, dir, elapsed)
 			elseif result.Instance.CanCollide then
 				pos = result.Position
-				projectile.CFrame = lookCFrame(pos, dir)
+				projectile.CFrame = spearCFrame(pos, dir, elapsed)
 				returning = true
 			else
 				pos += step
-				projectile.CFrame = lookCFrame(pos, dir)
+				projectile.CFrame = spearCFrame(pos, dir, elapsed)
 			end
 		else
 			pos += step
-			projectile.CFrame = lookCFrame(pos, dir)
+			projectile.CFrame = spearCFrame(pos, dir, elapsed)
 		end
 	end
 
@@ -237,9 +246,9 @@ local function throwSpear(player, lookVector)
 	end
 end
 
-SpearAction.OnServerEvent:Connect(function(player, action, lookVector)
+SpearAction.OnServerEvent:Connect(function(player, action, lookVector, chargeAlpha)
 	if action == "Throw" then
-		throwSpear(player, lookVector)
+		throwSpear(player, lookVector, chargeAlpha)
 	end
 end)
 

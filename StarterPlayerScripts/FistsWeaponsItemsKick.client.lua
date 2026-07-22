@@ -754,6 +754,16 @@ restoreWeaponToSlot = function(weaponId, preferredSlot)
 		warn(string.format("[WEAPON] Cannot restore missing weapon id '%s'", tostring(weaponId)))
 		return false
 	end
+	for i, existing in ipairs(weaponSlots) do
+		if existing and existing.id == def.id then
+			print(string.format("[WEAPON] %s already restored in slot %d", def.displayName or def.id, i))
+			if not activeSlot then
+				switchToSlot(i)
+			end
+			printSlots()
+			return true
+		end
+	end
 	local slot = preferredSlot
 	if type(slot) ~= "number" or slot < 1 or slot > #weaponSlots or weaponSlots[slot] then
 		slot = nil
