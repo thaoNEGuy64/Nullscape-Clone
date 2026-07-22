@@ -52,11 +52,18 @@ end)
 local function rememberOriginalRoom()
 	if roomTemplate then return true end
 	local room = Workspace:FindFirstChild("Room")
-	if not room or not room:IsA("Model") then return false end
+	if not room then
+		room = Workspace:WaitForChild("Room", 30)
+	end
+	if not room or not room:IsA("Model") then
+		warn("[ArtifactDeposit] Workspace.Room template was not found or is not a Model")
+		return false
+	end
 	roomTemplate = room:Clone()
 	roomTemplate.Name = "RoomTemplateRuntime"
 	roomTemplate.Parent = ReplicatedStorage
 	room:Destroy()
+	print("[ArtifactDeposit] Cached Workspace.Room as RoomTemplateRuntime")
 	return true
 end
 
@@ -72,10 +79,14 @@ end
 local function getConnectPart()
 	if connectPart and connectPart.Parent then return connectPart end
 	local connect = Workspace:FindFirstChild("Connect")
+	if not connect then
+		connect = Workspace:WaitForChild("Connect", 30)
+	end
 	if connect and connect:IsA("BasePart") then
 		connectPart = connect
 		return connectPart
 	end
+	warn("[ArtifactDeposit] Workspace.Connect was not found or is not a BasePart")
 	return nil
 end
 
@@ -130,6 +141,7 @@ local function cloneAndAttachRoom(targetDoorPart)
 	hideTargetDoor(targetDoorPart)
 	latestBackDoor = sealBackDoor(room)
 	table.insert(depositRooms, room)
+	print(string.format("[ArtifactDeposit] Attached deposit room #%d to %s", #depositRooms, targetDoorPart:GetFullName()))
 	return room
 end
 
@@ -262,8 +274,12 @@ GenComplete.Event:Connect(function(level)
 end)
 
 task.defer(function()
-	buildDepositRoomChain(1)
-	wirePedestals()
+	for attempt = 1, 6 do
+		buildDepositRoomChain(1)
+		wirePedestals()
+		if #depositRooms > 0 then return end
+		task.wait(1)
+	end
 end)
 
 print("[ArtifactDeposit] Ready")
