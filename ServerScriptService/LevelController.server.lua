@@ -657,9 +657,24 @@ local function startCollapsePhase()
 		}) end)
 
 	startMapBreakdown()
-	task.delay(1.5, function()
-		if GameState.state == "QuotaMet" then
-			advanceRound()
+	local function everyoneBackAtLobby()
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p:GetAttribute("IsDead") == true then
+				continue
+			end
+			if p:GetAttribute("EnteredLevel") == true then
+				return false
+			end
+		end
+		return true
+	end
+	task.spawn(function()
+		while GameState.state == "QuotaMet" and not roundTransitionInProgress do
+			if everyoneBackAtLobby() then
+				advanceRound()
+				return
+			end
+			task.wait(0.4)
 		end
 	end)
 end

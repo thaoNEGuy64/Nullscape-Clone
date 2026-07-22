@@ -46,6 +46,7 @@ local PodFade = getOrCreateRemote("PodFade")
 local DreamPodReady = getOrCreateBindable("DreamPodReady")
 local DreamPodArrived = getOrCreateBindable("DreamPodArrived")
 local DreamPodReturned = getOrCreateBindable("DreamPodReturned")
+local QuotaMetEvent = getOrCreateBindable("QuotaMetEvent")
 
 local cart = Workspace:WaitForChild(CART_NAME, 20)
 if not cart then
@@ -284,6 +285,15 @@ local function travelToLobby(player)
 	print("[DreamPod] Pod available in lobby")
 end
 
+local function pulseLiftDownForRoundEnd()
+	if traveling or cartLocation ~= "Lobby" or not cart or not cart.Parent then return end
+	local start = cart:GetPivot()
+	local lowered = start + Vector3.new(0, -12, 0)
+	tweenCartPivot(lowered, 0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, nil)
+	task.wait(0.2)
+	tweenCartPivot(start, 0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, nil)
+end
+
 DreamPodReady.Event:Connect(function(payload)
 	landingCFrame = payload and payload.LandingCFrame or ReplicatedStorage:GetAttribute("DreamPodLandingCFrame")
 	if typeof(landingCFrame) ~= "CFrame" then
@@ -297,6 +307,10 @@ DreamPodReady.Event:Connect(function(payload)
 	pivotCartTo(lobbyCFrame)
 	setAvailable(true)
 	print(string.format("[DreamPod] Ready for dream '%s'", tostring(payload and payload.DreamName or ReplicatedStorage:GetAttribute("ActiveDreamName"))))
+end)
+
+QuotaMetEvent.Event:Connect(function()
+	task.spawn(pulseLiftDownForRoundEnd)
 end)
 
 

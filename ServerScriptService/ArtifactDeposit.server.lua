@@ -191,6 +191,8 @@ local function onPedestalClicked(player)
 	local artifact = template:Clone()
 	artifact.Anchored = true
 	artifact.CanCollide = false
+	clickPart.Transparency = 1
+	clickPart.CanCollide = false
 	artifact.CFrame = clickPart.CFrame * CFrame.new(0, clickPart.Size.Y * 0.5 + artifact.Size.Y * 0.5 + 0.15, 0)
 	artifact.Parent = clickPart.Parent
 
